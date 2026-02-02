@@ -1,24 +1,6 @@
 # NetworkClass
 
-## Motivation
-
-Kubernetes assumes a single, implicit pod network. As multi-network use cases become more common (secondary networks, tenant isolation, SR-IOV, storage networks, data-plane separation), Kubernetes lacks a standard mechanism to identify and integrate multiple pod networks with core APIs such as Pods, Services, and NetworkPolicy.
-
-Currently, these "secondary" networks are defined by implementation-specific CRDs (e.g., OVN-Kubernetes with `UserDefinedNetwork`). Because there is no standard Kubernetes-owned "pointer" to these objects, the rest of the ecosystem remains blind to them.
-
-This proposal introduces `NetworkClass`, a Kubernetes-owned API that classifies implementation-defined network objects without standardizing their internal semantics and offers an attachment model for pod networks.
-
-Goals:
-* Provide a stable, Kubernetes-native abstraction to identify pod networks.
-* Leverage Dynamic Resource Allocation (DRA) to provide a consistent way for pods to attach to these networks via ResourceClaims.
-* Enable multiple network implementations to coexist without schema convergence.
-* Provide a common mechanism for secondary networks that the kubernetes ecosystem (Services, Network Policies...) could consume.
-
-Non-Goals:
-* Standardizing / Definition of an implementation-specific networking model such as IP address management, topology or routing behavior.
-* Imposing any non-kubernetes implementation specific underlying mechanism (e.g. CNI)
-
-## proposal
+## Proposal
 
 `NetworkClass` defines a mapping between a Kubernetes-recognized network class and an implementation-specific network object type. It does not define networking behavior or semantics. Instead, it provides a classification and discovery mechanism that allows Kubernetes APIs and controllers to recognize and integrate multiple pod networks.
 
@@ -45,14 +27,25 @@ type NetworkClass struct {
 
 // NetworkClassSpec describes how network objects of this class are identified.
 type NetworkClassSpec struct {
+  // TargetType identifies the API type of the network objects
+  // belonging to this NetworkClass.
+  TargetType GroupVersionKind
+}
+
+// GroupVersionKind identifies a Kubernetes API type.
+type GroupVersionKind struct {
 	// Group is the API group of the network object.
 	Group string
+
 	// Version is the API version of the network object.
 	Version string
+
 	// Kind is the Kind of the network object.
 	Kind string
 }
 ```
+
+### Attributes
 
 To integrate pod networks with Dynamic Resource Allocation (DRA), this proposal defines two new standard device attributes. These attributes allow `ResourceClaims` to select specific pod networks and allow the system to identify devices that attach workloads to a given network.
 
@@ -61,7 +54,7 @@ A device that attaches a workload to a network must report the associated Resour
 ```golang
 const (
 	// StandardDeviceAttributePrefix is the prefix used for standard device attributes.
-	StandardDeviceAttributePrefix = "resource.kubernetes.io/"
+	StandardDeviceAttributePrefix = "resource.kubernetes.io/" // To be determined.
 
 	// StandardDeviceAttributePodNetwork is a standard device attribute name
 	// which describes a pod network.
@@ -83,17 +76,20 @@ const (
 
 ### Example
 
+Note: OVN-Kubernetes is referenced in examples for illustrative purposes only. This proposal does not assume, require or imply that OVN-Kubernetes will adopt or implement the design described here.
+
 A cluster admin defines which types of pod networks are available in the cluster by creating one or more `NetworkClass` objects. Each `NetworkClass` maps to a specific implementation-defined network resource.
 
 ```yaml
-apiVersion: multinetwork.networking.k8s.io/v1
+apiVersion: multinetwork.networking.k8s.io/v1alpha1
 kind: NetworkClass
 metadata:
   name: ovn-kubernetes
 spec:
-  group: k8s.ovn.org
-  version: v1
-  kind: UserDefinedNetwork
+  targetType:
+    group: k8s.ovn.org
+    version: v1
+    kind: UserDefinedNetwork
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
@@ -191,7 +187,7 @@ Here is a diagram below representing the pod creation and its attachment to a po
 2. The pod network implementation attaches the Pod to the requested network.
 3. The pod network implementation reports the attachment status to the ResourceClaim device status.
 
-#### Identification of a network
+### Identification of a network
 
 Via the DRA feature in Kubernetes, an allocated device is reported in the ResourceClaim Status and identified by its set of device name, pool name and driver name ([MakeDeviceID(driver, pool, device string)](https://github.com/kubernetes/kubernetes/blob/v1.35.0/staging/src/k8s.io/dynamic-resource-allocation/structured/schedulerapi/types.go#L37)). The devices are allocated from the ResourceSlices based on the request and constraints in the ResourceClaim spec. An allocated device and its attributes can then be retrieved in the ResourceSlices via its identifier (device name, pool name and driver name). Thus, the pod network and networkClass can be retrieved in the attributes of the device in the ResourceSlice.
 
