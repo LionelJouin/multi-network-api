@@ -1,40 +1,40 @@
-# NetworkClass
+# NetworkKind
 
 ## Proposal
 
-`NetworkClass` defines a mapping between a Kubernetes-recognized network class and an implementation-specific pod network object type. It does not define networking behavior or semantics. Instead, it provides a classification and discovery mechanism that allows Kubernetes APIs and controllers to recognize and integrate multiple pod networks.
+`NetworkKind` defines a mapping between a Kubernetes-recognized network kind and an implementation-specific pod network object type. It does not define networking behavior or semantics. Instead, it provides a classification and discovery mechanism that allows Kubernetes APIs and controllers to recognize and integrate multiple pod networks.
 
-`NetworkClass` is a cluster-scoped resource. It is expected to be installed by the cluster administrator together with a pod network implementation.
+`NetworkKind` is a cluster-scoped resource. It is expected to be installed by the cluster administrator together with a pod network implementation.
 
-A `NetworkClass` references a specific Group/Kind (GK) and multiple `NetworkClass` cannot reference the same GK. Any object matching this GK is considered a pod network instance belonging to that `NetworkClass`. As a result, a pod network instance belongs to exactly one `NetworkClass`. Users create implementation-defined pod network objects, while Kubernetes uses NetworkClass to recognize them as pod networks. A pod network is identified by its name, namespace (if applicable), and its associated `NetworkClass`.
+A `NetworkKind` references a specific Group/Kind (GK) and multiple `NetworkKind` cannot reference the same GK. Any object matching this GK is considered a pod network instance belonging to that `NetworkKind`. As a result, a pod network instance belongs to exactly one `NetworkKind`. Users create implementation-defined pod network objects, while Kubernetes uses NetworkKind to recognize them as pod networks. A pod network is identified by its name, namespace (if applicable), and its associated `NetworkKind`.
 
-A `NetworkClass` is immutable once created, so the Group/Kind referenced by a `NetworkClass` cannot be changed. A `NetworkClass` cannot be deleted while at least one pod network object belonging to that `NetworkClass` exists.
+A `NetworkKind` is immutable once created, so the Group/Kind referenced by a `NetworkKind` cannot be changed. A `NetworkKind` cannot be deleted while at least one pod network object belonging to that `NetworkKind` exists.
 
-The presence of at least one `NetworkClass` object indicates that pod network (multi-network) functionality is available in the cluster.
+The presence of at least one `NetworkKind` object indicates that pod network (multi-network) functionality is available in the cluster.
 
 ```go
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// NetworkClass describes a class of pod networks implemented
+// NetworkKind describes a kind of pod networks implemented
 // by a specific controller and represented by implementation-defined objects.
-type NetworkClass struct {
+type NetworkKind struct {
   metav1.TypeMeta
   // Standard object's metadata.
   // More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
   // +optional
   metav1.ObjectMeta
-  // spec is the desired state of the NetworkClass.
+  // spec is the desired state of the NetworkKind.
   // More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
   // +optional
-  Spec NetworkClassSpec
+  Spec NetworkKindSpec
 }
 
-// NetworkClassSpec describes how pod network objects of this class are identified.
-type NetworkClassSpec struct {
+// NetworkKindSpec describes how pod network objects of this kind are identified.
+type NetworkKindSpec struct {
   // ImplementationType identifies the API type of the pod network objects
-  // belonging to this NetworkClass.
+  // belonging to this NetworkKind.
   // The ImplementationType may reference either a namespace-scoped or a cluster-scoped resource type.
   ImplementationType metav1.GroupKind
 }
@@ -48,7 +48,7 @@ Cluster administrators control how users may attach to pod networks by defining 
 
 Each DRA driver manages the full lifecycle of devices representing pod network attachments, including allocation, deallocation, and updates to device attributes. This design does not interpret the semantics of these devices, it relies solely on standard device attributes and the device status to enable discovery, selection, and attachment of pod networks.
 
-A pod network implementation may manage multiple `NetworkClass` objects and multiple types of pod networks. Multiple pod network implementations may manage the same `NetworkClass` or pod network type. In such cases, the implementations are responsible for coordinating among themselves (for example, using controller fields or labels). These interactions do not impact the design provided by `NetworkClass`.
+A pod network implementation may manage multiple `NetworkKind` objects and multiple types of pod networks. Multiple pod network implementations may manage the same `NetworkKind` or pod network type. In such cases, the implementations are responsible for coordinating among themselves (for example, using controller fields or labels). These interactions do not impact the design provided by `NetworkKind`.
 
 ### Resource Attributes
 
@@ -64,24 +64,24 @@ const (
   // StandardDeviceAttributePodNetwork is a standard device attribute name
   // which describes a pod network.
   // The value is a string value referring to the name of an object from the GK defined in the 
-  // StandardDeviceAttributeNetworkClass attribute.
+  // StandardDeviceAttributeNetworkKind attribute.
   StandardDeviceAttributePodNetwork resourceapi.QualifiedName = StandardDeviceAttributePrefix + "podNetwork"
   // StandardDeviceAttributePodNetworkNamespace is a standard device attribute name
   // which describes the namespace of a pod network.
   // The value is a string value referring to the namespace of a pod network object.
-  // The attribute is optional for the NetworkClass pointing to a non-namespaced GK.
-  // The attribute is mandatory for the NetworkClass pointing to a namespaced GK.
+  // The attribute is optional for the NetworkKind pointing to a non-namespaced GK.
+  // The attribute is mandatory for the NetworkKind pointing to a namespaced GK.
   StandardDeviceAttributePodNetworkNamespace resourceapi.QualifiedName = StandardDeviceAttributePrefix + "podNetworkNamespace"
-  // StandardDeviceAttributeNetworkClass is a standard device attribute name
-  // which describes a NetworkClass.
-  // The value is a string value referring to an existing NetworkClass object.
-  StandardDeviceAttributeNetworkClass resourceapi.QualifiedName = StandardDeviceAttributePrefix + "networkClass"
+  // StandardDeviceAttributeNetworkKind is a standard device attribute name
+  // which describes a NetworkKind.
+  // The value is a string value referring to an existing NetworkKind object.
+  StandardDeviceAttributeNetworkKind resourceapi.QualifiedName = StandardDeviceAttributePrefix + "networkKind"
 )
 ```
 
 ### Identification of a Pod Network
 
-Via the DRA feature in Kubernetes, an allocated device is reported in the ResourceClaim Status and identified by its set of device name, pool name and driver name ([MakeDeviceID(driver, pool, device string)](https://github.com/kubernetes/kubernetes/blob/v1.35.0/staging/src/k8s.io/dynamic-resource-allocation/structured/schedulerapi/types.go#L37)). The devices are allocated from the ResourceSlices based on the request and constraints in the ResourceClaim spec. An allocated device and its attributes can then be retrieved in the ResourceSlices via its identifier (device name, pool name and driver name). Thus, the pod network and NetworkClass can be retrieved in the attributes of the device in the ResourceSlice.
+Via the DRA feature in Kubernetes, an allocated device is reported in the ResourceClaim Status and identified by its set of device name, pool name and driver name ([MakeDeviceID(driver, pool, device string)](https://github.com/kubernetes/kubernetes/blob/v1.35.0/staging/src/k8s.io/dynamic-resource-allocation/structured/schedulerapi/types.go#L37)). The devices are allocated from the ResourceSlices based on the request and constraints in the ResourceClaim spec. An allocated device and its attributes can then be retrieved in the ResourceSlices via its identifier (device name, pool name and driver name). Thus, the pod network and NetworkKind can be retrieved in the attributes of the device in the ResourceSlice.
 
 Here is an example below:
 ```yaml
@@ -119,7 +119,7 @@ spec:
   - attributes:
       multinetwork.networking.k8s.io/podNetwork:
         string: blue-network
-      multinetwork.networking.k8s.io/networkClass:
+      multinetwork.networking.k8s.io/networkKind:
         string: ovn-kubernetes
     name: blue-network-resource # Device Name
   driver: udn.ovn-kubernetes.io # Driver Name
@@ -128,9 +128,9 @@ spec:
     name: kind-worker # Pool Name
 ```
 
-The attributes of the corresponding device are stating the pod network and NetworkClass.
+The attributes of the corresponding device are stating the pod network and NetworkKind.
 
-As a potential evolution that could simplify this architecture, the pod network and NetworkClass could be directly specified in the device status in the ResourceClaim. This could be done via 3 different way:
+As a potential evolution that could simplify this architecture, the pod network and NetworkKind could be directly specified in the device status in the ResourceClaim. This could be done via 3 different way:
 1. A new field in the network field of the device status of the ResourceClaim.
 2. A new API that will be required to be used in the generic `Data` field of the device status of the ResourceClaim.
 3. DRA reporting the attributes of the allocated device directly in the ResourceClaim status.
@@ -140,11 +140,11 @@ This evolution could help to solve some remaining questions such as, what happen
 
 Note: OVN-Kubernetes is referenced in examples for illustrative purposes only. This proposal does not assume, require or imply that OVN-Kubernetes will adopt or implement the design described here.
 
-A cluster admin defines which types of pod networks are available in the cluster by creating one or more `NetworkClass` objects. Each `NetworkClass` maps to a specific implementation-defined pod network resource.
+A cluster admin defines which types of pod networks are available in the cluster by creating one or more `NetworkKind` objects. Each `NetworkKind` maps to a specific implementation-defined pod network resource.
 
 ```yaml
 apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
-kind: NetworkClass
+kind: NetworkKind
 metadata:
   name: ovn-kubernetes
 spec:
@@ -159,7 +159,7 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: device.attributes["multinetwork.networking.k8s.io"].networkClass == "ovn-kubernetes"
+      expression: device.attributes["multinetwork.networking.k8s.io"].networkKind == "ovn-kubernetes"
 ```
 
 A pod network is declaratively defined using an implementation-specific pod network object. The pod network implementation prepares the underlying networking resources and advertises the availability of the pod network via the Resource API using a ResourceSlice.
@@ -184,6 +184,7 @@ spec:
         string: blue-network
       multinetwork.networking.k8s.io/podNetworkNamespace:
         string: default
+      multinetwork.networking.k8s.io/networkKind:
         string: ovn-kubernetes
     name: blue-network-resource
   driver: udn.ovn-kubernetes.io
@@ -232,19 +233,19 @@ status:
     pool: kind-worker
 ```
 
-**Note:** The selection of the `PodNetwork` and the `NetworkClass` can be done in the ResourceClaim but also in the DeviceClass.
+**Note:** The selection of the `PodNetwork` and the `NetworkKind` can be done in the ResourceClaim but also in the DeviceClass.
 
 Here is a diagram below representing the cluster preparation and the creation of a pod network:
 
-![Diagram](images/NetworkClass-1.png)
+![Diagram](images/NetworkKind-1.png)
 
-1. A cluster administrator deploys a pod network implementation together with a `NetworkClass` that points to the Group/Kind of the implementation pod network resource.
+1. A cluster administrator deploys a pod network implementation together with a `NetworkKind` that points to the Group/Kind of the implementation pod network resource.
 2. A user (determined by the implementation itself) creates a pod network using the implementation-defined pod network object.
 3. The pod network implementation provisions the underlying pod network and advertises its availability using a ResourceSlice.
 
 Here is a diagram below representing the pod creation and its attachment to a pod network:
 
-![Diagram](images/NetworkClass-2.png)
+![Diagram](images/NetworkKind-2.png)
 
 1. A user creates a Pod and an associated ResourceClaim requesting the attachment to a pod network.
 2. The pod network implementation attaches the Pod to the requested pod network.
@@ -254,23 +255,23 @@ Here is a diagram below representing the pod creation and its attachment to a po
 
 #### Conformance Tests
 
-Conformance tests validate that a pod network implementation correctly integrates with `NetworkClass` and the Kubernetes Resource API. These tests ensure that pod networks are discoverable, selectable, and observable using standard Kubernetes mechanisms.
+Conformance tests validate that a pod network implementation correctly integrates with `NetworkKind` and the Kubernetes Resource API. These tests ensure that pod networks are discoverable, selectable, and observable using standard Kubernetes mechanisms.
 
 Conformance tests validate:
 * ResourceSlice Advertisement: A pod network implementation must advertise each pod network instance using a ResourceSlice.
-   1. For every pod network object matching the Group/Kind referenced by a NetworkClass, at least one ResourceSlice is created.
+   1. For every pod network object matching the Group/Kind referenced by a NetworkKind, at least one ResourceSlice is created.
    2. Each advertised device includes the following attributes:
       * `multinetwork.networking.k8s.io/podNetwork`, identifying the pod network instance.
-      * `multinetwork.networking.k8s.io/networkClass`, identifying the corresponding NetworkClass.
+      * `multinetwork.networking.k8s.io/networkKind`, identifying the corresponding NetworkKind.
       * `multinetwork.networking.k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespaced-scoped. This attribute must not exist if the pod network object is cluster-scoped.
-   3. The advertised attributes accurately reflect the pod network object name, namespace (if applicable) and class.
+   3. The advertised attributes accurately reflect the pod network object name, namespace (if applicable) and kind.
 * ResourceClaim Pod Network Selection: A pod network implementation must support attaching a Pod to a pod network via ResourceClaim selection using standard device attributes.
-   1. A ResourceClaim selecting a pod network via the `multinetwork.networking.k8s.io/podNetwork`, the `multinetwork.networking.k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.k8s.io/networkClass` attributes can be successfully allocated.
+   1. A ResourceClaim selecting a pod network via the `multinetwork.networking.k8s.io/podNetwork`, the `multinetwork.networking.k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.k8s.io/networkKind` attributes can be successfully allocated.
    2. The allocation results in a device being bound to the ResourceClaim.
    3. The selected device corresponds to a pod network advertised via a ResourceSlice.
 * ResourceClaim Pod Network Status Reporting: A pod network implementation must report network attachment status through the ResourceClaim device status.
    1. For a Pod successfully attached to a pod network, the ResourceClaim status includes a device entry.
-   2. The reported device can be unambiguously matched to a device advertised in a ResourceSlice stating the actual PodNetwork and NetworkClass.
+   2. The reported device can be unambiguously matched to a device advertised in a ResourceSlice stating the actual PodNetwork and NetworkKind.
    3. The reported status includes sufficient information to identify the pod network attachment, such as:
       * Network interface name
       * Hardware address (if applicable)
@@ -278,15 +279,15 @@ Conformance tests validate:
 
 ### Conceptual Ecosystem Integration
 
-The following section is not a proposal to modify the Service Kubernetes APIs. It is a conceptual illustration only, intended to demonstrate how the `NetworkClass` abstraction proposed above could be integrated with other Kubernetes ecosystem APIs in the future. This section defines no requirements, no commitments, and no implied API changes.
+The following section is not a proposal to modify the Service Kubernetes APIs. It is a conceptual illustration only, intended to demonstrate how the `NetworkKind` abstraction proposed above could be integrated with other Kubernetes ecosystem APIs in the future. This section defines no requirements, no commitments, and no implied API changes.
 
-Conceptually, Kubernetes APIs that need to operate on a specific pod network could reference a pod network using a (class, name) tuple. This allows APIs to identify a pod network without understanding its implementation details.
+Conceptually, Kubernetes APIs that need to operate on a specific pod network could reference a pod network using a (kind, name) tuple. This allows APIs to identify a pod network without understanding its implementation details.
 
 ```golang
 // PodNetwork identifies a specific pod network instance.
 type PodNetwork struct {
-  // Class identifies the NetworkClass responsible for the pod network.
-  Class string
+  // Kind identifies the NetworkKind responsible for the pod network.
+  Kind string
 
   // Name identifies the pod network object.
   Name string
@@ -297,7 +298,7 @@ type PodNetwork struct {
 }
 ```
 
-The following example shows how a Kubernetes Service API could conceptually reference a pod network using `NetworkClass`. This is provided solely as an example to illustrate how `NetworkClass` enables ecosystem integration.
+The following example shows how a Kubernetes Service API could conceptually reference a pod network using `NetworkKind`. This is provided solely as an example to illustrate how `NetworkKind` enables ecosystem integration.
 
 ```golang
 // Service describes what network traffic is allowed for a set of pods
@@ -332,7 +333,7 @@ metadata:
   name: my-service
 spec:
   podNetwork:
-    class: ovn-kubernetes
+    kind: ovn-kubernetes
     name: blue-network
   selector:
     app.kubernetes.io/name: MyApp
