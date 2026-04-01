@@ -6,15 +6,15 @@
 
 `NetworkKind` is a cluster-scoped resource. It is expected to be installed by the cluster administrator together with a pod network implementation.
 
-A `NetworkKind` references a specific Group/Kind (GK) and multiple `NetworkKind` cannot reference the same GK. Any object matching this GK is considered a pod network instance belonging to that `NetworkKind`. As a result, a pod network instance belongs to exactly one `NetworkKind`. Users create implementation-defined pod network objects, while Kubernetes uses NetworkKind to recognize them as pod networks. A pod network is identified by its name, namespace (if applicable), and its associated `NetworkKind`.
+A `NetworkKind` references a specific Group/Kind (GK) and multiple `NetworkKind` objects cannot reference the same GK. Any object matching this GK is considered a pod network instance belonging to that `NetworkKind`. As a result, a pod network instance belongs to exactly one `NetworkKind`. Users create implementation-defined pod network objects, while Kubernetes uses NetworkKind to recognize them as pod networks. A pod network is identified by its name, namespace (if applicable), and its associated `NetworkKind`.
 
-A `NetworkKind` is immutable once created, so the Group/Kind referenced by a `NetworkKind` cannot be changed. A `NetworkKind` cannot be deleted while at least one pod network object belonging to that `NetworkKind` exists.
+A `NetworkKind` is immutable once created, so the Group/Kind referenced by a `NetworkKind` cannot be changed. A `NetworkKind` cannot be deleted while at least one pod network object belonging to that `NetworkKind` exists. A `NetworkKind` reports an `ImplementationTypeReady` status condition indicating whether the CRD referenced by its `ImplementationType` exists and is ready in the cluster.
 
 The presence of at least one `NetworkKind` object indicates that pod network (multi-network) functionality is available in the cluster.
 
 ```go
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+  metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // NetworkKind describes a kind of pod networks implemented
@@ -29,6 +29,10 @@ type NetworkKind struct {
   // More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
   // +optional
   Spec NetworkKindSpec
+  // status is the current state of the NetworkKind.
+  // More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+  // +optional
+  Status NetworkKindStatus
 }
 
 // NetworkKindSpec describes how pod network objects of this kind are identified.
@@ -38,6 +42,32 @@ type NetworkKindSpec struct {
   // The ImplementationType may reference either a namespace-scoped or a cluster-scoped resource type.
   ImplementationType metav1.GroupKind
 }
+
+// NetworkKindStatus describes the observed state of the NetworkKind.
+type NetworkKindStatus struct {
+  // conditions is the list of conditions for this NetworkKind.
+  // +optional
+  // +listType=map
+  // +listMapKey=type
+  Conditions []metav1.Condition
+}
+
+// Well-known condition types for NetworkKinds.
+const (
+  // NetworkKindConditionImplementationTypeReady indicates whether the CRD referenced by the
+  // NetworkKind's ImplementationType exists and is ready in the cluster.
+  NetworkKindConditionImplementationTypeReady = "ImplementationTypeReady"
+)
+
+// Well-known condition reasons for NetworkKinds.
+const (
+  // NetworkKindReasonCRDNotFound indicates that the CRD referenced by the
+  // NetworkKind's ImplementationType does not exist in the cluster.
+  NetworkKindReasonCRDNotFound string = "CRDNotFound"
+  // NetworkKindReasonCRDNotReady indicates that the CRD referenced by the
+  // NetworkKind's ImplementationType exists but is not yet ready.
+  NetworkKindReasonCRDNotReady string = "CRDNotReady"
+)
 ```
 
 A pod network implementation must act as a Dynamic Resource Allocation (DRA) driver to conform to this design. The implementation is responsible for advertising each pod network instance as one or more devices via ResourceSlices. Each advertised device represents the ability to attach workloads to the corresponding pod network.
@@ -52,7 +82,7 @@ A pod network implementation may manage multiple `NetworkKind` objects and multi
 
 ### Resource Attributes
 
-To integrate pod networks with Dynamic Resource Allocation (DRA), this proposal defines two new standard device attributes. These attributes allow `ResourceClaims` to select specific pod networks and allow the system to identify devices that attach workloads to a given pod network.
+To integrate pod networks with Dynamic Resource Allocation (DRA), this proposal defines three new standard device attributes. These attributes allow `ResourceClaims` to select specific pod networks and allow the system to identify devices that attach workloads to a given pod network.
 
 A device that attaches a workload to a pod network must report the associated ResourceClaim device status with a reference to the pod network. The relationship between a device and a pod network can be determined by matching the device identifier and its attributes in the corresponding ResourceSlice.
 
@@ -135,6 +165,44 @@ As a potential evolution that could simplify this architecture, the pod network 
 2. A new API that will be required to be used in the generic `Data` field of the device status of the ResourceClaim.
 3. DRA reporting the attributes of the allocated device directly in the ResourceClaim status.
 This evolution could help to solve some remaining questions such as, what happens if a device representing a pod network is being removed while a ResourceClaim is using it? Or, what happens if the attributes change while a ResourceClaim is using it?
+
+### CustomResourceDefinition Category
+
+Without a common `PodNetwork` API, there is no single resource type that represents all pod networks across implementations. Each implementation defines its own CustomResourceDefinition, so discovering all pod networks in a cluster requires knowing every implementation-specific type.
+
+To address this, pod network implementations must register their CRD under the `podnetwork` and `podnetworks` categories. CRD categories allow `kubectl` to aggregate resources of different types under a single alias, enabling users to list all pod networks across all implementations with a single command: `kubectl get podnetworks`.
+
+Here below, an example CRD including the required `categories`:
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: userdefinednetworks.k8s.ovn.org
+spec:
+  group: k8s.ovn.org
+  names:
+    kind: UserDefinedNetwork
+    listKind: UserDefinedNetworkList
+    plural: userdefinednetworks
+    shortNames:
+    - udn
+    singular: userdefinednetwork
+    categories:
+    - podnetwork
+    - podnetworks
+    - all
+```
+
+When multiple implementations are present, `kubectl` lists all matching resources grouped by resource type:
+```sh
+$ kubectl get podnetworks --all-namespaces
+NAME                                            AGE
+my-clusterwide-network.example.com/my-network   56s
+
+NAMESPACE   NAME                                           AGE
+default     userdefinednetworks.k8s.ovn.org/blue-network   37s
+default     userdefinednetworks.k8s.ovn.org/red-network    45s
+```
 
 ### Example
 
@@ -253,29 +321,68 @@ Here is a diagram below representing the pod creation and its attachment to a po
 
 ### Implementation
 
+The `NetworkKind` API requires server-side validation to enforce constraints that cannot be expressed through CRD schema validation alone. These constraints involve cross-object uniqueness and referential integrity checks that require knowledge of the cluster state at admission time.
+
+Validation must enforce the following:
+
+* Group/Kind Uniqueness: Two or more `NetworkKind` objects cannot reference the same Group/Kind. On creation of a `NetworkKind`, the webhook must list existing `NetworkKind` objects and reject the request if another `NetworkKind` already references the same Group/Kind. Since `NetworkKind` is immutable, updates to the `spec` are already rejected by CRD-level validation, so this check only applies on create.
+
+* Deletion Protection: A `NetworkKind` cannot be deleted while pod network objects belonging to it still exist. On deletion of a `NetworkKind`, the webhook must check whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the deletion must be rejected. This prevents orphaning pod network objects that would no longer be recognized by any `NetworkKind`.
+
+* Immutability: The `spec` of a `NetworkKind` is immutable once created. Updates to the `spec` field must be rejected. This can be enforced via CRD-level validation rules (e.g., CEL `x-kubernetes-validations`) or through the webhook.
+
+A controller must enforce the following:
+
+* ImplementationTypeReady Condition: A controller must watch `NetworkKind` objects and the CRDs in the cluster. For each `NetworkKind`, the controller must look up the CRD matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly. The condition is set to `True` when the CRD exists and is ready. The condition is set to `False` with reason `CRDNotFound` when the CRD does not exist, or `CRDNotReady` when the CRD exists but is not yet ready.
+
+#### E2E Tests
+
+E2E tests validate that the `NetworkKind` lifecycle and validation constraints are correctly enforced in a running cluster.
+
+E2E tests validate:
+* Group/Kind Uniqueness:
+  1. Creating a `NetworkKind` referencing a Group/Kind succeeds when no other `NetworkKind` references the same Group/Kind.
+  2. Creating a second `NetworkKind` referencing the same Group/Kind as an existing `NetworkKind` is rejected.
+  3. After deleting the first `NetworkKind`, creating a new `NetworkKind` referencing the same Group/Kind succeeds.
+* Deletion Protection:
+  1. Deleting a `NetworkKind` succeeds when no pod network objects of the referenced Group/Kind exist.
+  2. Deleting a `NetworkKind` is rejected when at least one pod network object of the referenced Group/Kind exists in the cluster.
+  3. After deleting all pod network objects of the referenced Group/Kind, deleting the `NetworkKind` succeeds.
+* Immutability:
+  1. Updating the `spec` of an existing `NetworkKind` (e.g., changing the Group/Kind) is rejected.
+  2. Updating the `metadata` (e.g., labels, annotations) of an existing `NetworkKind` succeeds.
+* ImplementationTypeReady Condition:
+  1. Creating a `NetworkKind` referencing an existing and ready CRD results in the `ImplementationTypeReady` condition being set to `True`.
+  2. Creating a `NetworkKind` referencing a non-existent CRD results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotFound`.
+  3. Deleting the CRD referenced by a `NetworkKind` results in the `ImplementationTypeReady` condition being updated to `False` with reason `CRDNotFound`.
+  4. Creating the CRD referenced by a `NetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
+
 #### Conformance Tests
 
 Conformance tests validate that a pod network implementation correctly integrates with `NetworkKind` and the Kubernetes Resource API. These tests ensure that pod networks are discoverable, selectable, and observable using standard Kubernetes mechanisms.
 
 Conformance tests validate:
+* CRD Category: A pod network implementation must include the `podnetwork` and `podnetworks` categories in its CRD.
+  1. The CRD referenced by a `NetworkKind` includes `podnetwork` and `podnetworks` in its `spec.names.categories`.
+  2. Pod network objects of the referenced Group/Kind are listed when querying the `podnetwork` category (e.g., `kubectl get podnetwork`).
 * ResourceSlice Advertisement: A pod network implementation must advertise each pod network instance using a ResourceSlice.
-   1. For every pod network object matching the Group/Kind referenced by a NetworkKind, at least one ResourceSlice is created.
-   2. Each advertised device includes the following attributes:
-      * `multinetwork.networking.k8s.io/podNetwork`, identifying the pod network instance.
-      * `multinetwork.networking.k8s.io/networkKind`, identifying the corresponding NetworkKind.
-      * `multinetwork.networking.k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespaced-scoped. This attribute must not exist if the pod network object is cluster-scoped.
-   3. The advertised attributes accurately reflect the pod network object name, namespace (if applicable) and kind.
+  1. For every pod network object matching the Group/Kind referenced by a NetworkKind, at least one ResourceSlice is created.
+  2. Each advertised device includes the following attributes:
+    * `multinetwork.networking.k8s.io/podNetwork`, identifying the pod network instance.
+    * `multinetwork.networking.k8s.io/networkKind`, identifying the corresponding NetworkKind.
+    * `multinetwork.networking.k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespaced-scoped. This attribute must not exist if the pod network object is cluster-scoped.
+  3. The advertised attributes accurately reflect the pod network object name, namespace (if applicable) and kind.
 * ResourceClaim Pod Network Selection: A pod network implementation must support attaching a Pod to a pod network via ResourceClaim selection using standard device attributes.
-   1. A ResourceClaim selecting a pod network via the `multinetwork.networking.k8s.io/podNetwork`, the `multinetwork.networking.k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.k8s.io/networkKind` attributes can be successfully allocated.
-   2. The allocation results in a device being bound to the ResourceClaim.
-   3. The selected device corresponds to a pod network advertised via a ResourceSlice.
+  1. A ResourceClaim selecting a pod network via the `multinetwork.networking.k8s.io/podNetwork`, the `multinetwork.networking.k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.k8s.io/networkKind` attributes can be successfully allocated.
+  2. The allocation results in a device being bound to the ResourceClaim.
+  3. The selected device corresponds to a pod network advertised via a ResourceSlice.
 * ResourceClaim Pod Network Status Reporting: A pod network implementation must report network attachment status through the ResourceClaim device status.
-   1. For a Pod successfully attached to a pod network, the ResourceClaim status includes a device entry.
-   2. The reported device can be unambiguously matched to a device advertised in a ResourceSlice stating the actual PodNetwork and NetworkKind.
-   3. The reported status includes sufficient information to identify the pod network attachment, such as:
-      * Network interface name
-      * Hardware address (if applicable)
-      * Assigned IP addresses (if applicable)
+  1. For a Pod successfully attached to a pod network, the ResourceClaim status includes a device entry.
+  2. The reported device can be unambiguously matched to a device advertised in a ResourceSlice stating the actual PodNetwork and NetworkKind.
+  3. The reported status includes sufficient information to identify the pod network attachment, such as:
+    * Network interface name
+    * Hardware address (if applicable)
+    * Assigned IP addresses (if applicable)
 
 ### Conceptual Ecosystem Integration
 
@@ -292,7 +399,7 @@ type PodNetwork struct {
   // Name identifies the pod network object.
   Name string
 
-  // Name identifies the namespace of the pod network object.
+  // Namespace identifies the namespace of the pod network object.
   // Optional if the pod network object is a non-namespace object.
   Namespace *string
 }
