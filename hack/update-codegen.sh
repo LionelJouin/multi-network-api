@@ -23,7 +23,7 @@ OUTPUT_PKG="github.com/kubernetes-sigs/multi-network-api"
 
 go run sigs.k8s.io/controller-tools/cmd/controller-gen \
 	crd \
-	paths="./..." \
+	paths="${OUTPUT_PKG}/apis/..." \
 	output:crd:artifacts:config=deployment
 
 go run sigs.k8s.io/controller-tools/cmd/controller-gen \

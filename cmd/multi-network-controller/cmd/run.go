@@ -93,12 +93,15 @@ func (ro *runOptions) run(ctx context.Context) error {
 	informerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, defaultInformerResyncPeriod)
 	apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(apiextensionsClient, defaultInformerResyncPeriod)
 
-	networkKindController := networkkind.NewNetworkKindController(
+	networkKindController, err := networkkind.NewNetworkKindController(
 		networkKindInformerFactory.Multinetwork().V1alpha1().NetworkKinds(),
 		apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
 		networkKindClient.MultinetworkV1alpha1().NetworkKinds(),
 		kubeClient,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create network kind controller: %v", err)
+	}
 
 	networkKindInformerFactory.Start(ctx.Done())
 	informerFactory.Start(ctx.Done())
@@ -108,7 +111,7 @@ func (ro *runOptions) run(ctx context.Context) error {
 	informerFactory.WaitForCacheSync(ctx.Done())
 	apiextensionsInformerFactory.WaitForCacheSync(ctx.Done())
 
-	err = networkKindController.Run(ctx)
+	err = networkKindController.Run(ctx, 1)
 	if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 		return fmt.Errorf("failed to run network kind controller: %v", err)
 	}
