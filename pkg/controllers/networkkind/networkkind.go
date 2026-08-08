@@ -39,13 +39,17 @@ const (
 	queueName = "network_kind"
 )
 
+type reconciler interface {
+	Reconcile(ctx context.Context, networkKindName string) error
+}
+
 type NetworkKindController struct {
 	customResourceDefinitionSynced cache.InformerSynced
 	networkKindSynced              cache.InformerSynced
 
 	networkKindQueue workqueue.TypedRateLimitingInterface[string]
 
-	networkKindReconciler *NetworkKindReconciler
+	networkKindReconciler reconciler
 }
 
 func NewNetworkKindController(
@@ -105,41 +109,19 @@ func (nkc *NetworkKindController) enqueueNetworkKind(obj interface{}) {
 }
 
 func (nkc *NetworkKindController) onCustomResourceDefinitionEvent(oldObj, newObj interface{}) {
-	var ok bool
-	newName := ""
-	oldName := ""
-
-	var newCrd *apiextensionsv1.CustomResourceDefinition
-	if newObj != nil {
-		newCrd, ok = newObj.(*apiextensionsv1.CustomResourceDefinition)
-		if !ok {
-			klog.Error(nil, "Expected CustomResourceDefinition", "actual", fmt.Sprintf("%T", newObj))
-			return
+	for _, obj := range []interface{}{oldObj, newObj} {
+		if obj == nil {
+			continue
 		}
-		if newCrd != nil {
-			newName = v1alpha1.GetNetworkKindName(newCrd.Spec.Group, newCrd.Spec.Names.Kind)
-		}
-	}
 
-	var oldCrd *apiextensionsv1.CustomResourceDefinition
-	if oldObj != nil {
-		oldCrd, ok = oldObj.(*apiextensionsv1.CustomResourceDefinition)
+		crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
 		if !ok {
-			klog.Error(nil, "Expected CustomResourceDefinition", "actual", fmt.Sprintf("%T", oldObj))
+			klog.Error(nil, "Expected CustomResourceDefinition", "actual", fmt.Sprintf("%T", obj))
 			return
 		}
 
-		if oldCrd != nil {
-			oldName = v1alpha1.GetNetworkKindName(oldCrd.Spec.Group, oldCrd.Spec.Names.Kind)
-		}
-	}
-
-	if newName != "" && newName != oldName {
-		nkc.networkKindQueue.Add(oldName)
-	}
-
-	if newName != "" {
-		nkc.networkKindQueue.Add(newName)
+		name := v1alpha1.GetNetworkKindName(crd.Spec.Group, crd.Spec.Names.Kind)
+		nkc.networkKindQueue.Add(name)
 	}
 }
 

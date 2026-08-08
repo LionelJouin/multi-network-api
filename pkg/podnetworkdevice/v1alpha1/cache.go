@@ -27,6 +27,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,6 +49,8 @@ const (
 
 	claimDriverPoolIndex = "claimDriverPool"
 	deviceIDSliceIndex   = "deviceIDSlice"
+
+	kind = "PodNetworkDevice"
 )
 
 // PodNetworkDeviceCache watches Pods, ResourceClaims, and ResourceSlices
@@ -93,19 +96,37 @@ func NewPodNetworkDeviceCache(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: queueName},
 		),
+		snapshot: map[string]*PodNetworkDevice{},
 	}
 
 	pndc.watcher = watch.NewBroadcaster(1000, watch.DropIfChannelFull)
 
-	pndc.informer = cache.NewSharedIndexInformer(
-		&cache.ListWatch{
-			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-				return nil, nil
-			},
-			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
-				return pndc.watcher.Watch()
-			},
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+			podNetworkDevices := pndc.List(ctx)
+			deviceList := &PodNetworkDeviceList{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       kind,
+					APIVersion: v1alpha1.GroupVersion.String(),
+				},
+				ListMeta: metav1.ListMeta{},
+				Items:    []PodNetworkDevice{},
+			}
+			for _, podNetworkDevice := range podNetworkDevices {
+				if podNetworkDevice == nil {
+					continue
+				}
+				deviceList.Items = append(deviceList.Items, *podNetworkDevice)
+			}
+			return deviceList, nil
 		},
+		WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+			return pndc.watcher.Watch()
+		},
+	}
+
+	pndc.informer = cache.NewSharedIndexInformer(
+		&listWatch{lw},
 		&PodNetworkDevice{},
 		0,
 		cache.Indexers{},
@@ -133,6 +154,20 @@ func NewPodNetworkDeviceCache(
 		DeleteFunc: func(obj interface{}) { pndc.onResourceSliceEvent(obj, nil) },
 	}); err != nil {
 		return nil, fmt.Errorf("failed to add ResourceSlice event handler: %w", err)
+	}
+
+	err := pndc.resourceSliceIndexer.AddIndexers(cache.Indexers{
+		deviceIDSliceIndex: deviceIDSliceIndexFunc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add indexer for ResourceSlice: %w", err)
+	}
+
+	err = pndc.resourceClaimIndexer.AddIndexers(cache.Indexers{
+		claimDriverPoolIndex: claimDriverPoolIndexFunc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add indexer for ResourceClaim: %w", err)
 	}
 
 	return pndc, nil
@@ -234,13 +269,28 @@ func (pndc *PodNetworkDeviceCache) Get(namespace, name string) (*PodNetworkDevic
 }
 
 // List returns all PodNetworkDevices matching the given options.
-func (pndc *PodNetworkDeviceCache) List() []*PodNetworkDevice {
+func (pndc *PodNetworkDeviceCache) List(ctx context.Context, opts ...Option) []*PodNetworkDevice {
+	options := &listOption{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
 	result := []*PodNetworkDevice{}
 
 	for _, obj := range pndc.informer.GetStore().List() {
 		pnd, ok := obj.(*PodNetworkDevice)
 		if !ok {
 			continue
+		}
+
+		if options.labelSelector != nil && !options.labelSelector.Matches(labels.Set(pnd.Labels)) {
+			continue
+		}
+
+		if options.podNetworkRef != nil {
+			if !hasMatchingPodNetworkRef(pnd, options.podNetworkRef) {
+				continue
+			}
 		}
 
 		result = append(result, pnd)
@@ -309,11 +359,12 @@ func (pndc *PodNetworkDeviceCache) buildPodNetworkDevice(pod *v1.Pod) *PodNetwor
 			UID:       pod.UID,
 			Labels:    pod.Labels,
 		},
+		Pod:     pod,
 		Devices: make(map[string]*Device),
 	}
 
 	for _, claimStatus := range pod.Status.ResourceClaimStatuses {
-		claimName := claimStatus.Name // todo
+		claimName := claimStatus.Name // todo: resolve the claim name from the ResourceClaimStatus if ResourceClaimName is nil (to be found in the pod.Spec.ResourceClaims)
 		if claimStatus.ResourceClaimName != nil {
 			claimName = *claimStatus.ResourceClaimName
 		}
@@ -330,15 +381,16 @@ func (pndc *PodNetworkDeviceCache) buildPodNetworkDevice(pod *v1.Pod) *PodNetwor
 
 			sliceDevice := pndc.findSliceDevice(allocDevice.Driver, allocDevice.Pool, allocDevice.Device)
 
+			if sliceDevice == nil {
+				continue
+			}
+
 			dev := &Device{
 				AllocatedDeviceStatus: &claim.Status.Devices[i],
 				Device:                sliceDevice,
 				PodNetworkRef:         &PodNetworkRef{},
 			}
 
-			if sliceDevice == nil {
-				continue
-			}
 			attr, ok := sliceDevice.Attributes[v1alpha1.StandardDeviceAttributeNetworkKind]
 			if !ok || attr.StringValue == nil {
 				continue
@@ -494,3 +546,21 @@ func deviceIDKey(driver, pool, device string) string {
 func claimDriverPoolKey(driver, pool string) string {
 	return fmt.Sprintf("%s/%s", driver, pool)
 }
+
+func hasMatchingPodNetworkRef(pnd *PodNetworkDevice, ref *PodNetworkRef) bool {
+	for _, dev := range pnd.Devices {
+		if dev.PodNetworkRef.IsEqual(ref) {
+			return true
+		}
+	}
+	return false
+}
+
+// listWatch wraps a ListerWatcher to opt out of the WatchList streaming
+// protocol. Synthetic informers backed by a watch.Broadcaster do not support
+// SendInitialEvents / bookmark signaling.
+type listWatch struct {
+	cache.ListerWatcher
+}
+
+func (listWatch) IsWatchListSemanticsUnSupported() bool { return true }

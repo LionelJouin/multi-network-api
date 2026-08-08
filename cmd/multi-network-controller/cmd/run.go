@@ -24,7 +24,9 @@ import (
 
 	networkKindClientset "github.com/kubernetes-sigs/multi-network-api/pkg/client/clientset/versioned"
 	networkKindInformers "github.com/kubernetes-sigs/multi-network-api/pkg/client/informers/externalversions"
+	"github.com/kubernetes-sigs/multi-network-api/pkg/controllers/endpointslice"
 	"github.com/kubernetes-sigs/multi-network-api/pkg/controllers/networkkind"
+	"github.com/kubernetes-sigs/multi-network-api/pkg/podnetworkdevice/v1alpha1"
 	"github.com/spf13/cobra"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
@@ -103,6 +105,25 @@ func (ro *runOptions) run(ctx context.Context) error {
 		return fmt.Errorf("failed to create network kind controller: %v", err)
 	}
 
+	podNetworkDeviceCache, err := v1alpha1.NewPodNetworkDeviceCache(
+		informerFactory.Core().V1().Pods(),
+		informerFactory.Resource().V1().ResourceClaims(),
+		informerFactory.Resource().V1().ResourceSlices(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create pod network device cache: %v", err)
+	}
+
+	endpointSliceController, err := endpointslice.NewEndpointSliceController(
+		informerFactory.Discovery().V1().EndpointSlices(),
+		informerFactory.Core().V1().Services(),
+		podNetworkDeviceCache,
+		kubeClient,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create endpoint slice controller: %v", err)
+	}
+
 	networkKindInformerFactory.Start(ctx.Done())
 	informerFactory.Start(ctx.Done())
 	apiextensionsInformerFactory.Start(ctx.Done())
@@ -111,10 +132,28 @@ func (ro *runOptions) run(ctx context.Context) error {
 	informerFactory.WaitForCacheSync(ctx.Done())
 	apiextensionsInformerFactory.WaitForCacheSync(ctx.Done())
 
-	err = networkKindController.Run(ctx, 1)
-	if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
-		return fmt.Errorf("failed to run network kind controller: %v", err)
-	}
+	go func() {
+		err = networkKindController.Run(ctx, 1)
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			klog.FromContext(ctx).Error(err, "failed to run network kind controller")
+		}
+	}()
+
+	go func() {
+		err = podNetworkDeviceCache.Run(ctx, 1)
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			klog.FromContext(ctx).Error(err, "failed to run pod network device cache")
+		}
+	}()
+
+	go func() {
+		err = endpointSliceController.Run(ctx, 1)
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			klog.FromContext(ctx).Error(err, "failed to run endpoint slice controller")
+		}
+	}()
+
+	<-ctx.Done()
 
 	return nil
 }

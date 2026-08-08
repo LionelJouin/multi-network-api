@@ -52,6 +52,6 @@ go run k8s.io/code-generator/cmd/informer-gen \
 	--go-header-file ${SCRIPT_ROOT}/hack/boilerplate.go.txt \
 	"${OUTPUT_PKG}/apis/v1alpha1"
 
-  go run k8s.io/code-generator/cmd/register-gen \
+go run k8s.io/code-generator/cmd/register-gen \
 	--output-file "zz_generated.register.go" \
 	"${OUTPUT_PKG}/apis/v1alpha1"

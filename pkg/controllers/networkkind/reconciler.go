@@ -18,7 +18,6 @@ package networkkind
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
@@ -27,6 +26,7 @@ import (
 	authv1 "k8s.io/api/authorization/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	v1apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -79,6 +79,9 @@ func NewNetworkKindReconciler(
 func (nkr *NetworkKindReconciler) Reconcile(ctx context.Context, networkKindName string) error {
 	networkKind, err := nkr.networkKindLister.Get(networkKindName)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to get NetworkKind: %w", err)
 	}
 	oldNetworkKind := networkKind.DeepCopy()
@@ -96,7 +99,7 @@ func (nkr *NetworkKindReconciler) Reconcile(ctx context.Context, networkKindName
 		var ok bool
 		crd, ok = objs[0].(*apiextensionsv1.CustomResourceDefinition)
 		if !ok {
-			return fmt.Errorf("Unexpected type for CustomResourceDefinition: %T", objs[0], "type", fmt.Sprintf("%T", objs[0]))
+			return fmt.Errorf("Unexpected type for CustomResourceDefinition: %T", objs[0])
 		}
 	}
 
@@ -220,9 +223,6 @@ func (nkr *NetworkKindReconciler) hasPermissions(ctx context.Context, crd *apiex
 	if err != nil {
 		return false, fmt.Errorf("failed to create SelfSubjectAccessReview: %w", err)
 	}
-
-	a, _ := json.Marshal(result)
-	fmt.Println(string(a))
 
 	return result.Status.Allowed, nil
 }
