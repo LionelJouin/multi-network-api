@@ -40,7 +40,16 @@ type NetworkKindSpec struct {
   // ImplementationType identifies the API type of the pod network objects
   // belonging to this NetworkKind.
   // The ImplementationType may reference either a namespace-scoped or a cluster-scoped resource type.
+  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.ImplementationType is immutable"
   ImplementationType metav1.GroupKind
+
+  // DefaultNetworkKind indicates whether this NetworkKind is the default for the cluster.
+  // If true, this NetworkKind is the default for the cluster and will be used when no specific NetworkKind is specified.
+  // If false, this NetworkKind is not the default for the cluster and will only be used when explicitly requested.
+  // If not specified, the default is false.
+  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.DefaultNetworkKind is immutable"
+  // +optional
+  DefaultNetworkKind *bool
 }
 
 // NetworkKindStatus describes the observed state of the NetworkKind.
@@ -50,6 +59,15 @@ type NetworkKindStatus struct {
   // +listType=map
   // +listMapKey=type
   Conditions []metav1.Condition
+
+  // DefaultNetworkKind indicates whether this NetworkKind has been selected to be the default for the cluster.
+  // When multiple NetworkKinds have spec.DefaultNetworkKind set to true, the candidate selected as default 
+  // is the oldest NetworkKind determined by metadata.creationTimestamp.
+  // If another NetworkKind is already the active default NetworkKind, this field will be false even if 
+  // spec.DefaultNetworkKind is true, and a condition will be set to indicate that the default NetworkKind 
+  // is already set.
+  // +optional
+  DefaultNetworkKind *bool
 }
 
 // Well-known condition types for NetworkKinds.
@@ -57,16 +75,40 @@ const (
   // NetworkKindConditionImplementationTypeReady indicates whether the CRD referenced by the
   // NetworkKind's ImplementationType exists and is ready in the cluster.
   NetworkKindConditionImplementationTypeReady = "ImplementationTypeReady"
+
+ // NetworkKindConditionDefaultNetworkKind indicates whether this NetworkKind has been selected 
+ // to be the default for the cluster.
+ // This condition is added only when the spec.DefaultNetworkKind is true.
+  NetworkKindConditionDefaultNetworkKind = "DefaultNetworkKind"
 )
 
 // Well-known condition reasons for NetworkKinds.
 const (
-  // NetworkKindReasonCRDNotFound indicates that the CRD referenced by the
-  // NetworkKind's ImplementationType does not exist in the cluster.
-  NetworkKindReasonCRDNotFound string = "CRDNotFound"
-  // NetworkKindReasonCRDNotReady indicates that the CRD referenced by the
-  // NetworkKind's ImplementationType exists but is not yet ready.
-  NetworkKindReasonCRDNotReady string = "CRDNotReady"
+	// NetworkKindReasonCRDNotFound in the ImplementationTypeReady condition indicates
+	// that the CRD referenced by the NetworkKind's ImplementationType does not exist
+	// in the cluster.
+	NetworkKindReasonCRDNotFound string = "CRDNotFound"
+	// NetworkKindReasonCRDNotReady in the ImplementationTypeReady condition indicates
+	// that the CRD referenced by the NetworkKind's ImplementationType exists but is not
+	// yet ready.
+	// Ready means that the CRD has been established, its names have been accepted and it contains
+	// the required categories.
+	NetworkKindReasonCRDNotReady string = "CRDNotReady"
+	// NetworkKindReasonMissingRBAC in the ImplementationTypeReady condition indicates
+	// that the necessary RBAC permissions are missing for the CRD referenced by the
+	// NetworkKind's ImplementationType.
+	NetworkKindReasonMissingRBAC string = "MissingRBAC"
+	// NetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
+	// that the CRD referenced by the NetworkKind's ImplementationType exists and is ready.
+	NetworkKindReasonCompliant string = "Compliant"
+
+  // NetworkKindReasonDefaultNetworkKindSet in the DefaultNetworkKind condition indicates
+  // that this NetworkKind has been selected to be the default for the cluster.
+  NetworkKindReasonDefaultNetworkKindSet string = "DefaultNetworkKindSet"
+  // NetworkKindReasonDefaultNetworkKindAlreadySet in the DefaultNetworkKind condition indicates 
+  // that this NetworkKind cannot be set as the default for the cluster because another 
+  // NetworkKind is already set as the default.
+  NetworkKindReasonDefaultNetworkKindAlreadySet string = "DefaultNetworkKindAlreadySet"
 )
 ```
 
@@ -84,36 +126,58 @@ A pod network implementation may manage multiple `NetworkKind` objects and multi
 
 To integrate pod networks with Dynamic Resource Allocation (DRA), this proposal defines three new standard device attributes. These attributes allow `ResourceClaims` to select specific pod networks and allow the system to identify devices that attach workloads to a given pod network.
 
-A device that attaches a workload to a pod network must report the associated ResourceClaim device status with a reference to the pod network. The relationship between a device and a pod network can be determined by matching the device identifier and its attributes in the corresponding ResourceSlice.
+A device that attaches a workload to a pod network must report the associated ResourceClaim device status with a reference to the pod network in its `data` field. The relationship between an advertised device and a pod network is exposed via the device attributes in the corresponding ResourceSlice.
 
 ```golang
 const (
   // StandardDeviceAttributePrefix is the prefix used for standard device attributes.
-  StandardDeviceAttributePrefix = "multinetwork.networking.k8s.io/" 
+  StandardDeviceAttributePrefix = "multinetwork.networking.k8s.io" 
 
   // StandardDeviceAttributePodNetwork is a standard device attribute name
   // which describes a pod network.
   // The value is a string value referring to the name of an object from the GK defined in the 
   // StandardDeviceAttributeNetworkKind attribute.
-  StandardDeviceAttributePodNetwork resourceapi.QualifiedName = StandardDeviceAttributePrefix + "podNetwork"
+  StandardDeviceAttributePodNetwork resourceapi.QualifiedName = StandardDeviceAttributePrefix + "/" + "podNetwork"
   // StandardDeviceAttributePodNetworkNamespace is a standard device attribute name
   // which describes the namespace of a pod network.
   // The value is a string value referring to the namespace of a pod network object.
   // The attribute is optional for the NetworkKind pointing to a non-namespaced GK.
   // The attribute is mandatory for the NetworkKind pointing to a namespaced GK.
-  StandardDeviceAttributePodNetworkNamespace resourceapi.QualifiedName = StandardDeviceAttributePrefix + "podNetworkNamespace"
+  StandardDeviceAttributePodNetworkNamespace resourceapi.QualifiedName = StandardDeviceAttributePrefix + "/" + "podNetworkNamespace"
   // StandardDeviceAttributeNetworkKind is a standard device attribute name
   // which describes a NetworkKind.
   // The value is a string value referring to an existing NetworkKind object.
-  StandardDeviceAttributeNetworkKind resourceapi.QualifiedName = StandardDeviceAttributePrefix + "networkKind"
+  StandardDeviceAttributeNetworkKind resourceapi.QualifiedName = StandardDeviceAttributePrefix + "/" + "networkKind"
 )
 ```
 
 ### Identification of a Pod Network
 
-Via the DRA feature in Kubernetes, an allocated device is reported in the ResourceClaim Status and identified by its set of device name, pool name and driver name ([MakeDeviceID(driver, pool, device string)](https://github.com/kubernetes/kubernetes/blob/v1.35.0/staging/src/k8s.io/dynamic-resource-allocation/structured/schedulerapi/types.go#L37)). The devices are allocated from the ResourceSlices based on the request and constraints in the ResourceClaim spec. An allocated device and its attributes can then be retrieved in the ResourceSlices via its identifier (device name, pool name and driver name). Thus, the pod network and NetworkKind can be retrieved in the attributes of the device in the ResourceSlice.
+When a device representing a pod network attachment is allocated to a workload, the pod network implementation (acting as a DRA driver) reports the attachment details in the `ResourceClaim` device status.
 
-Here is an example below:
+To allow Kubernetes APIs and controllers to identify which pod network an interface is attached to without requiring them to query and join `ResourceSlice` objects, conforming DRA drivers populate the `data` field of the allocated device entry with a `PodNetwork` structure.
+
+```go
+// PodNetwork identifies a specific pod network instance.
+type PodNetwork struct {
+  // Kind identifies the NetworkKind responsible for the pod network.
+  // +optional
+  Kind string `json:"kind,omitempty"`
+
+  // Name identifies the pod network object.
+  Name string `json:"name"`
+
+  // Namespace identifies the namespace of the pod network object.
+  // Optional if the pod network object is a non-namespaced resource.
+  // +optional
+  Namespace *string `json:"namespace,omitempty"`
+}
+```
+
+In addition to the `data.podNetwork` reference, the driver reports the network interface connection details in the standard `networkData` field (including interface name, hardware address, and assigned IPs).
+
+Here is an example `ResourceClaim` status reporting the allocated device:
+
 ```yaml
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaim
@@ -122,7 +186,6 @@ metadata:
 spec:
 ...
 status:
-...
   allocation:
     devices:
       results:
@@ -130,41 +193,25 @@ status:
         driver: udn.ovn-kubernetes.io
         pool: kind-worker
         request: blue-network
-```
-
-The identifier of the allocated device is:
-* Device Name: blue-network-resource
-* Pool Name: kind-worker
-* Driver Name: udn.ovn-kubernetes.io
-
-The device can be retrieved in the ResourceSlice:
-
-```yaml
-apiVersion: resource.k8s.io/v1
-kind: ResourceSlice
-metadata:
-  name: kind-worker-ovn-kubernetes
-spec:
+        shareID: 8e7acdf9-0290-4ecd-a801-a654b021d2b7
   devices:
-  - attributes:
-      multinetwork.networking.k8s.io/podNetwork:
-        string: blue-network
-      multinetwork.networking.k8s.io/networkKind:
-        string: ovn-kubernetes
-    name: blue-network-resource # Device Name
-  driver: udn.ovn-kubernetes.io # Driver Name
-  nodeName: kind-worker
-  pool:
-    name: kind-worker # Pool Name
+  - data:
+      podNetwork:
+        kind: userdefinednetwork
+        name: blue-network
+        namespace: default
+    device: blue-network-resource
+    driver: udn.ovn-kubernetes.io
+    networkData:
+      hardwareAddress: 00:01:ec:84:fb:51
+      interfaceName: net1
+      ips:
+      - 10.10.1.2/24
+    pool: kind-worker
+    shareID: 8e7acdf9-0290-4ecd-a801-a654b021d2b7
 ```
 
-The attributes of the corresponding device are stating the pod network and NetworkKind.
-
-As a potential evolution that could simplify this architecture, the pod network and NetworkKind could be directly specified in the device status in the ResourceClaim. This could be done via 3 different way:
-1. A new field in the network field of the device status of the ResourceClaim.
-2. A new API that will be required to be used in the generic `Data` field of the device status of the ResourceClaim.
-3. DRA reporting the attributes of the allocated device directly in the ResourceClaim status.
-This evolution could help to solve some remaining questions such as, what happens if a device representing a pod network is being removed while a ResourceClaim is using it? Or, what happens if the attributes change while a ResourceClaim is using it?
+This self-contained reporting model ensures that controllers (e.g. EndpointSlice, network policy...) can unambiguously determine the network identity directly from the `ResourceClaim` status, without being affected by subsequent modifications to or deletions of `ResourceSlice` objects.
 
 ### CustomResourceDefinition Category
 
@@ -204,6 +251,30 @@ default     userdefinednetworks.k8s.ovn.org/blue-network   37s
 default     userdefinednetworks.k8s.ovn.org/red-network    45s
 ```
 
+### Default NetworkKind
+
+A cluster administrator can designate a `NetworkKind` as the cluster-wide default by setting `spec.defaultNetworkKind: true`.
+
+In many clusters, only a single pod network implementation is installed, or one particular network type serves as the primary standard. Requiring users, manifests, and ecosystem APIs to always explicitly qualify network references with a `NetworkKind` introduces unnecessary verbosity and couples configurations to specific implementation types.
+
+The default `NetworkKind` provides a cluster-wide fallback whenever the `kind` is omitted from a network reference:
+* **Workload & ResourceClaim Portability:** Users can request attachment to a pod network simply by specifying the network name (and namespace, if applicable), without needing to know or hardcode the underlying implementation's `NetworkKind`.
+* **Generic DeviceClasses:** Cluster administrators can define a common `DeviceClass` targeting the default `NetworkKind`. Workload manifests can then reference this standard class across environments regardless of the specific network provider deployed in the cluster.
+* **Ecosystem API Integration:** High-level abstractions (e.g. Services, Gateway API routes, NetworkPolicies...) targeting pod networks can accept simple network name references and automatically resolve them to the default `NetworkKind`.
+
+Cluster administrators can define a `DeviceClass` targeting the default `NetworkKind`:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: default-network-kind
+spec:
+  selectors:
+  - cel:
+      expression: device.attributes["multinetwork.networking.k8s.io"].networkKind == "userdefinednetwork" && has(device.attributes["multinetwork.networking.k8s.io"].podNetwork)
+```
+
 ### Example
 
 Note: OVN-Kubernetes is referenced in examples for illustrative purposes only. This proposal does not assume, require or imply that OVN-Kubernetes will adopt or implement the design described here.
@@ -214,7 +285,7 @@ A cluster admin defines which types of pod networks are available in the cluster
 apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
 kind: NetworkKind
 metadata:
-  name: ovn-kubernetes
+  name: userdefinednetwork
 spec:
   implementationType:
     group: k8s.ovn.org
@@ -227,7 +298,7 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: device.attributes["multinetwork.networking.k8s.io"].networkKind == "ovn-kubernetes"
+      expression: device.attributes["multinetwork.networking.k8s.io"].networkKind == "userdefinednetwork"
 ```
 
 A pod network is declaratively defined using an implementation-specific pod network object. The pod network implementation prepares the underlying networking resources and advertises the availability of the pod network via the Resource API using a ResourceSlice.
@@ -253,7 +324,7 @@ spec:
       multinetwork.networking.k8s.io/podNetworkNamespace:
         string: default
       multinetwork.networking.k8s.io/networkKind:
-        string: ovn-kubernetes
+        string: userdefinednetwork
     name: blue-network-resource
   driver: udn.ovn-kubernetes.io
   nodeName: kind-worker
@@ -279,7 +350,7 @@ spec:
               expression: device.attributes["multinetwork.networking.k8s.io"].podNetwork == "blue-network" && device.attributes["multinetwork.networking.k8s.io"].podNetworkNamespace == "default"
 ```
 
-Once the workload is attached to the pod network, the pod network implementation reports the attachment details in the ResourceClaim device status. This includes implementation-specific connection data such as interface name, hardware address, and assigned IPs.
+Once the workload is attached to the pod network, the pod network implementation reports the attachment details in the ResourceClaim device status. This includes the `podNetwork` reference in the `data` field, as well as implementation-specific connection data in `networkData` such as interface name, hardware address, and assigned IPs.
 
 ```yaml
 apiVersion: resource.k8s.io/v1
@@ -291,7 +362,12 @@ spec:
 status:
 ...
   devices:
-  - device: blue-network-resource
+  - data:
+      podNetwork:
+        kind: userdefinednetwork
+        name: blue-network
+        namespace: default
+    device: blue-network-resource
     driver: udn.ovn-kubernetes.io
     networkData:
       hardwareAddress: 5a:9f:d8:84:fb:51
@@ -319,6 +395,52 @@ Here is a diagram below representing the pod creation and its attachment to a po
 2. The pod network implementation attaches the Pod to the requested pod network.
 3. The pod network implementation reports the attachment status to the ResourceClaim device status.
 
+#### Default NetworkKind Example
+
+A `NetworkKind` successfully selected as the cluster default:
+
+```yaml
+apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
+kind: NetworkKind
+metadata:
+  name: userdefinednetwork
+spec:
+  implementationType:
+    group: k8s.ovn.org
+    kind: UserDefinedNetwork
+  defaultNetworkKind: true
+status:
+  defaultNetworkKind: true
+  conditions:
+  - type: DefaultNetworkKind
+    status: "True"
+    lastTransitionTime: "2026-09-16T14:19:25Z"
+    reason: DefaultNetworkKindSet
+    message: "This NetworkKind is set as the default for the cluster."
+```
+
+A second `NetworkKind` requesting default status while an active default is already present:
+
+```yaml
+apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
+kind: NetworkKind
+metadata:
+  name: secondary-network-kind
+spec:
+  implementationType:
+    group: example.com
+    kind: SecondaryNetwork
+  defaultNetworkKind: true
+status:
+  defaultNetworkKind: false
+  conditions:
+  - type: DefaultNetworkKind
+    status: "False"
+    lastTransitionTime: "2026-09-16T14:20:00Z"
+    reason: DefaultNetworkKindAlreadySet
+    message: "Another NetworkKind is already set as the default for the cluster."
+```
+
 ### Implementation
 
 The `NetworkKind` API requires server-side validation to enforce constraints that cannot be expressed through CRD schema validation alone. These constraints involve cross-object uniqueness and referential integrity checks that require knowledge of the cluster state at admission time.
@@ -333,7 +455,9 @@ Validation must enforce the following:
 
 A controller must enforce the following:
 
-* ImplementationTypeReady Condition: A controller must watch `NetworkKind` objects and the CRDs in the cluster. For each `NetworkKind`, the controller must look up the CRD matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly. The condition is set to `True` when the CRD exists and is ready. The condition is set to `False` with reason `CRDNotFound` when the CRD does not exist, or `CRDNotReady` when the CRD exists but is not yet ready.
+* ImplementationTypeReady Condition: A controller must watch `NetworkKind` objects and the CRDs in the cluster. For each `NetworkKind`, the controller must look up the CRD matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly. The condition is set to `True` when the CRD exists and is ready. The condition is set to `False` with reason `CRDNotFound` when the CRD does not exist, or `CRDNotReady` when the CRD exists but is not yet ready (conditions Established, NamesAccepted and correct categories set), or `MissingRBAC` when its necessary RBAC permissions are missing.
+
+* DefaultNetworkKind Condition and Status: A controller must manage default `NetworkKind` selection. When one or more `NetworkKind` objects have `spec.defaultNetworkKind: true`, the controller determines the active default by selecting the candidate with the oldest `metadata.creationTimestamp`. For the selected candidate, it sets `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` to `True` with reason `DefaultNetworkKindSet`. For any other candidate requesting default status, it sets `status.defaultNetworkKind: false` and condition `DefaultNetworkKind` to `False` with reason `DefaultNetworkKindAlreadySet`. If the active default is deleted, the controller reconciles remaining candidates with `spec.defaultNetworkKind: true` and promotes the oldest candidate via `metadata.creationTimestamp` to become the new active default.
 
 #### E2E Tests
 
@@ -356,6 +480,14 @@ E2E tests validate:
   2. Creating a `NetworkKind` referencing a non-existent CRD results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotFound`.
   3. Deleting the CRD referenced by a `NetworkKind` results in the `ImplementationTypeReady` condition being updated to `False` with reason `CRDNotFound`.
   4. Creating the CRD referenced by a `NetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
+  5. Creating a `NetworkKind` referencing a CRD that exists but is not yet ready results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotReady`.
+  6. Creating a `NetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
+  7. Granting sufficient RBAC permissions to a `NetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
+* DefaultNetworkKind Condition:
+  1. Creating a `NetworkKind` with `spec.defaultNetworkKind: true` when no default exists results in `status.defaultNetworkKind: true` and `DefaultNetworkKind` condition set to `True` with reason `DefaultNetworkKindSet`.
+  2. Creating subsequent `NetworkKind` objects (e.g., NetworkKind B and NetworkKind C) with `spec.defaultNetworkKind: true` while an active default (NetworkKind A) exists results in both NetworkKind B and C having `status.defaultNetworkKind: false` and `DefaultNetworkKind` condition set to `False` with reason `DefaultNetworkKindAlreadySet`.
+  3. Deleting the active default `NetworkKind` (A) when multiple NetworkKinds remain (NetworkKind B created before NetworkKind C) results in NetworkKind B (the oldest remaining NetworkKind by `metadata.creationTimestamp`) being promoted to `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` updated to `True` with reason `DefaultNetworkKindSet`, while NetworkKind C remains `status.defaultNetworkKind: false` with reason `DefaultNetworkKindAlreadySet`.
+  4. Deleting NetworkKind B results in NetworkKind C being promoted to `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` updated to `True` with reason `DefaultNetworkKindSet`.
 
 #### Conformance Tests
 
@@ -378,8 +510,8 @@ Conformance tests validate:
   3. The selected device corresponds to a pod network advertised via a ResourceSlice.
 * ResourceClaim Pod Network Status Reporting: A pod network implementation must report network attachment status through the ResourceClaim device status.
   1. For a Pod successfully attached to a pod network, the ResourceClaim status includes a device entry.
-  2. The reported device can be unambiguously matched to a device advertised in a ResourceSlice stating the actual PodNetwork and NetworkKind.
-  3. The reported status includes sufficient information to identify the pod network attachment, such as:
+  2. The reported device includes the `podNetwork` object in `status.devices[].data`, stating the associated `kind`, `name`, and `namespace` (if applicable).
+  3. The reported status includes sufficient information in `networkData` to identify the pod network attachment, such as:
     * Network interface name
     * Hardware address (if applicable)
     * Assigned IP addresses (if applicable)
@@ -394,13 +526,16 @@ Conceptually, Kubernetes APIs that need to operate on a specific pod network cou
 // PodNetwork identifies a specific pod network instance.
 type PodNetwork struct {
   // Kind identifies the NetworkKind responsible for the pod network.
-  Kind string
+  // +optional
+  Kind *string
 
   // Name identifies the pod network object.
-  Name string
+  // +required
+  Name *string
 
   // Namespace identifies the namespace of the pod network object.
   // Optional if the pod network object is a non-namespace object.
+  // +optional
   Namespace *string
 }
 ```
@@ -429,6 +564,29 @@ type ServiceSpec struct {
 
   ...
 }
+
+// ServiceStatus represents the current status of a service
+type ServiceStatus struct {
+  // PodNetwork specifies the pod network this Service is currently applied to.
+  // This field is set by the NetworkKind controller and reflects the actual pod network
+  // the Service is applied to.
+  //
+  // If the spec.PodNetwork.Kind is nil, then the NetworkKind controller will find the default 
+  // NetworkKind and set the status.PodNetwork.Kind to the default NetworkKind. 
+  // If there is no default NetworkKind, the status.PodNetwork.Kind will be nil and a warning 
+  // condition will be set to indicate that no default NetworkKind is available.
+  // If the spec.PodNetwork.Kind is not nil, then the NetworkKind controller will set the 
+  // status.PodNetwork.Kind to the spec.PodNetwork.Kind.
+  //
+  // If nil, the legacy behavior is used, which is to apply the 
+  // Service to the default network.
+  // +optional
+  PodNetwork *PodNetwork
+
+	// Current service condition
+	// +optional
+	Conditions []metav1.Condition
+}
 ```
 
 Example Service Definition (Conceptual):
@@ -440,7 +598,6 @@ metadata:
   name: my-service
 spec:
   podNetwork:
-    kind: ovn-kubernetes
     name: blue-network
   selector:
     app.kubernetes.io/name: MyApp
@@ -448,14 +605,106 @@ spec:
   - protocol: TCP
     port: 80
     targetPort: 9376
+status:
+  podNetwork:
+    kind: userdefinednetwork # userdefinednetwork is the default NetworkKind in this example, the status.Kind is resolved and set by a controller.
+    name: blue-network
 ```
 
 ## Alternatives
 
-An alternative approach discussed previously was the introduction of a PodNetwork API representing a pod network instance directly.
+### PodNetwork
 
-In this model, PodNetwork would have been an object containing a small set of common, implementation-agnostic fields. Rather than embedding implementation-specific networking semantics, the PodNetwork object would reference a separate, implementation defined network object that described the actual network configuration.
+An alternative approach discussed was the introduction of a `PodNetwork` API representing a pod network instance directly.
 
-Under this approach, creating a pod network would require users to create two resources:
-* A PodNetwork object, used by Kubernetes APIs to identify and reference the network.
-* An implementation-specific network object, reconciled by the network implementation.
+In this model, `PodNetwork` is a cluster-scoped object containing a small set of common, implementation-agnostic fields (such as `provider` and `networkRef`). Rather than embedding implementation-specific networking semantics into a single monolithic API, the `PodNetwork` object references a separate, implementation-defined Custom Resource (CR) describing the actual network configuration:
+
+```yaml
+apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
+kind: PodNetwork
+metadata:
+  name: blue-network
+spec: 
+  provider: ovn-kubernetes
+  networkRef:
+    group: k8s.ovn.org
+    kind: UserDefinedNetwork
+    name: blue-network
+    namespace: default
+---
+apiVersion: k8s.ovn.org/v1
+kind: UserDefinedNetwork
+metadata:
+  name: blue-network
+  namespace: default
+spec: 
+  ...
+```
+
+Under this approach, creating a pod network requires maintaining two resources for every network instance:
+1. A cluster-scoped `PodNetwork` object, used by Kubernetes APIs and ResourceClaims to reference the network by a single name.
+2. An implementation-specific network object (e.g., `UserDefinedNetwork`), reconciled by the network provider's controller.
+
+While this approach provides a single simple reference to a pod network, it introduces architectural trade-offs:
+* **Object Duplication:** Creating two objects per network instance increases API server overhead and requires continuous synchronization between the `PodNetwork` and the implementation CR.
+* **Naming Conflicts across Providers:** A flat cluster-scoped namespace allows multiple providers to collide when creating networks with identical names.
+* **Scope Mismatch:** Mapping namespace-scoped implementation CRs to cluster-scoped `PodNetwork` objects causes collisions when different namespaces define networks with the same local name.
+
+### Network Interface Selection
+
+Another alternative approach is to avoid introducing any dedicated network API resource altogether (neither `NetworkKind` nor `PodNetwork`).
+
+In this model, the multi-network project does not define or manage network objects in Kubernetes. Instead, network provisioning and workload attachment rely entirely on native Dynamic Resource Allocation (DRA). Ecosystem integrations (e.g. Services, Gateway API, NetworkPolicies...) interact directly with pod network interfaces by selecting them based on interface names, labels, driver names, or custom properties reported in the `ResourceClaim` device status.
+
+A DRA driver allocates a network device to a pod and populates the `ResourceClaim` status with implementation-specific metadata:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: blue-network-attachment
+spec:
+  ...
+status:
+  allocation:
+    devices:
+      results:
+      - device: eth1
+        driver: cni.dra.networking.x-k8s.io
+        pool: kind-worker
+        shareID: 8e7acdf9-0290-4ecd-a801-a654b021d2b7
+  devices:
+  - data:
+      labels:
+        podNetwork: blue-network
+        implementation: userdefinednetwork
+    device: eth1
+    driver: cni.dra.networking.x-k8s.io
+    networkData:
+      hardwareAddress: 5a:9f:d8:84:fb:51
+      interfaceName: net1
+      ips:
+      - 10.10.1.2/24
+    pool: kind-worker
+    shareID: 8e7acdf9-0290-4ecd-a801-a654b021d2b7
+```
+
+Higher-level ecosystem APIs (e.g. NetworkPolicy, Services...) then reference the interface directly:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-policy
+spec:
+  networkInterfaceRef:
+    interfaceName: net1
+    labels:
+      podNetwork: blue-network
+      implementation: userdefinednetwork
+```
+
+While this approach eliminates the need for a new cluster-level network API, it presents drawbacks:
+* **Tight Coupling to Interface Names and Drivers:** Policies, services, and workload configurations must reference low-level interface names (such as `net1`) or driver-specific fields, which can vary across nodes and implementations, breaking workload and policy portability.
+* **Lack of Discovery and Inventory:** Cluster administrators and users cannot query or list available networks (`kubectl get podnetworks`), nor can they discover which network implementations and types are active in the cluster.
+
