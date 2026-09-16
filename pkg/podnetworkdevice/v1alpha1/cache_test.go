@@ -176,12 +176,13 @@ func TestEventHandlers(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                      string
-		initialObjects            []runtime.Object
-		createObjects             []object
-		updateObjects             []object
-		deleteObjects             []object
-		expectedPodNetworkDevices []*PodNetworkDevice
+		name                             string
+		initialObjects                   []runtime.Object
+		initialExpectedPodNetworkDevices []*PodNetworkDevice
+		createObjects                    []object
+		updateObjects                    []object
+		deleteObjects                    []object
+		expectedPodNetworkDevices        []*PodNetworkDevice
 	}{
 		{
 			name:           "pod with one allocated network device",
@@ -252,7 +253,16 @@ func TestEventHandlers(t *testing.T) {
 		{
 			name:           "pod deletion removes pod network device",
 			initialObjects: []runtime.Object{makeSlice(sliceDevice), makeClaim(allocatedDeviceStatus), pod},
-			deleteObjects:  []object{pod},
+			initialExpectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+			deleteObjects: []object{pod},
 		},
 		{
 			name:           "resource claim creation triggers sync",
@@ -282,6 +292,108 @@ func TestEventHandlers(t *testing.T) {
 				}),
 			},
 		},
+		{
+			name:           "resource claim update adds device to pod network device",
+			initialObjects: []runtime.Object{makeSlice(sliceDevice, sliceDevice2), makeClaim(allocatedDeviceStatus), pod},
+			initialExpectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+			updateObjects: []object{makeClaim(allocatedDeviceStatus, allocatedDeviceStatus2)},
+			expectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+					"test-driver/test-pool/dev-1": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus2,
+						Device:                &sliceDevice2,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+		},
+		{
+			name:           "resource claim deletion removes pod network device",
+			initialObjects: []runtime.Object{makeSlice(sliceDevice), makeClaim(allocatedDeviceStatus), pod},
+			initialExpectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+			deleteObjects: []object{makeClaim(allocatedDeviceStatus)},
+		},
+		{
+			name:           "resource slice update adds device to pod network device",
+			initialObjects: []runtime.Object{makeSlice(sliceDevice), makeClaim(allocatedDeviceStatus, allocatedDeviceStatus2), pod},
+			initialExpectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+			updateObjects: []object{makeSlice(sliceDevice, sliceDevice2)},
+			expectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+					"test-driver/test-pool/dev-1": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus2,
+						Device:                &sliceDevice2,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+		},
+		{
+			name:           "resource slice deletion removes pod network device",
+			initialObjects: []runtime.Object{makeSlice(sliceDevice), makeClaim(allocatedDeviceStatus), pod},
+			initialExpectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+			deleteObjects: []object{makeSlice(sliceDevice)},
+		},
+		{
+			name: "pod update triggers sync",
+			initialObjects: []runtime.Object{
+				makeSlice(sliceDevice),
+				makeClaim(allocatedDeviceStatus),
+				&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default", UID: "test-pod-uid"}},
+			},
+			updateObjects: []object{pod},
+			expectedPodNetworkDevices: []*PodNetworkDevice{
+				makeExpectedPND(map[string]*Device{
+					"test-driver/test-pool/dev-0": {
+						AllocatedDeviceStatus: &allocatedDeviceStatus,
+						Device:                &sliceDevice,
+						PodNetworkRef:         &PodNetworkRef{Kind: networkKind, Name: podNetworkName, Namespace: &podNetworkNamespace},
+					},
+				}),
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,7 +406,7 @@ func TestEventHandlers(t *testing.T) {
 				_ = networkDeviceCache.Run(ctx, 1)
 			}()
 
-			waitForCachePopulated(ctx, t, networkDeviceCache, len(tt.deleteObjects))
+			waitForCachePopulated(ctx, t, networkDeviceCache, len(tt.initialExpectedPodNetworkDevices))
 
 			action := func(obj object, actionType string) {
 				var gvr *schema.GroupVersionResource
@@ -341,15 +453,14 @@ func TestEventHandlers(t *testing.T) {
 				action(object, "delete")
 			}
 
-			waitForCachePopulated(ctx, t, networkDeviceCache, len(tt.expectedPodNetworkDevices))
-
-			actual := networkDeviceCache.List(ctx)
 			expected := tt.expectedPodNetworkDevices
 			if expected == nil {
 				expected = []*PodNetworkDevice{}
 			}
-			if !reflect.DeepEqual(actual, expected) {
-				t.Errorf("unexpected PodNetworkDevices\n got: %+v\nwant: %+v", actual, expected)
+			if err := wait.PollUntilContextTimeout(ctx, 1*time.Millisecond, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+				return reflect.DeepEqual(networkDeviceCache.List(ctx), expected), nil
+			}); err != nil {
+				t.Errorf("unexpected PodNetworkDevices\n got: %+v\nwant: %+v", networkDeviceCache.List(ctx), expected)
 			}
 		})
 	}

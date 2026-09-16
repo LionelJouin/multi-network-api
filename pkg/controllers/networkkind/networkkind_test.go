@@ -99,13 +99,14 @@ func TestEventHandlers(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                      string
-		initialNetworkKindObjects []runtime.Object
-		initialCRDObjects         []runtime.Object
-		createObjects             []object
-		updateObjects             []object
-		deleteObjects             []object
-		expectedNetworkKindNames  []string
+		name                          string
+		initialNetworkKindObjects     []runtime.Object
+		initialCRDObjects             []runtime.Object
+		initialExpectedNetworkKindNames []string
+		createObjects                 []object
+		updateObjects                 []object
+		deleteObjects                 []object
+		expectedNetworkKindNames      []string
 	}{
 		{
 			name:                      "no event",
@@ -161,6 +162,7 @@ func TestEventHandlers(t *testing.T) {
 			initialNetworkKindObjects: []runtime.Object{
 				&v1alpha1.NetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-network-kind"}},
 			},
+			initialExpectedNetworkKindNames: []string{"my-network-kind"},
 			deleteObjects: []object{
 				&v1alpha1.NetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-network-kind"}},
 			},
@@ -177,6 +179,7 @@ func TestEventHandlers(t *testing.T) {
 					},
 				},
 			},
+			initialExpectedNetworkKindNames: []string{"example-com-mynetwork"},
 			deleteObjects: []object{
 				&apiextensionsv1.CustomResourceDefinition{
 					ObjectMeta: metav1.ObjectMeta{Name: "mynetworks.example.com"},
@@ -199,6 +202,7 @@ func TestEventHandlers(t *testing.T) {
 					},
 				},
 			},
+			initialExpectedNetworkKindNames: []string{"old-example-com-oldnetwork"},
 			updateObjects: []object{
 				&apiextensionsv1.CustomResourceDefinition{
 					ObjectMeta: metav1.ObjectMeta{Name: "mynetworks.example.com"},
@@ -250,6 +254,14 @@ func TestEventHandlers(t *testing.T) {
 			go func() {
 				_ = networkKindController.Run(ctx, 1)
 			}()
+
+			if len(tt.initialExpectedNetworkKindNames) > 0 {
+				if err := wait.PollUntilContextTimeout(ctx, 1*time.Millisecond, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+					return len(fr.getNetworkKindNames()) >= len(tt.initialExpectedNetworkKindNames), nil
+				}); err != nil {
+					t.Fatalf("timed out waiting for initial reconciliation, got: %v, want at least: %v", fr.getNetworkKindNames(), tt.initialExpectedNetworkKindNames)
+				}
+			}
 
 			// Helper function to perform create, update, and delete actions on objects
 			action := func(obj object, actionType string) {

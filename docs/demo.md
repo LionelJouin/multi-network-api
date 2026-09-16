@@ -7,20 +7,6 @@ kubectl apply -f ./deployment
 ```yaml
 kubectl apply -f - <<EOF
 ---
-apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
-kind: NetworkKind
-metadata:
-  name: devicenetwork-io-devicenetwork
-spec:
-  implementationType:
-    group: devicenetwork.io
-    kind: DeviceNetwork
-EOF
-```
-
-```yaml
-kubectl apply -f - <<EOF
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -48,17 +34,31 @@ EOF
 ```yaml
 kubectl apply -f - <<EOF
 ---
+apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
+kind: NetworkKind
+metadata:
+  name: devicenetwork-io-devicenetwork
+spec:
+  implementationType:
+    group: devicenetwork.io
+    kind: DeviceNetwork
+EOF
+```
+
+```yaml
+kubectl apply -f - <<EOF
+---
 apiVersion: v1
 kind: Service
 metadata:
   name: service-a
   labels:
     multinetwork.networking.k8s.io/spec.podnetwork.kind: devicenetwork-io-devicenetwork
-    multinetwork.networking.k8s.io/spec.podnetwork.name: all-network
+    multinetwork.networking.k8s.io/spec.podnetwork.name: my-network
 spec:
   clusterIP: None
   selector:
-    app: demo
+    app: demo-macvlan
     multinetwork.networking.k8s.io/dummy: "true"
 EOF
 ```
@@ -72,3 +72,6 @@ kubectl apply -f ./deployment
 
 kubectl apply -f examples/example.yaml
 kubectl apply -f examples/demo.yaml
+
+
+go test ./test/e2e/ -implementation-group=devicenetwork.io -implementation-kind=DeviceNetwork -pod-network=all-network
