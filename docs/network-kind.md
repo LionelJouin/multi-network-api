@@ -76,31 +76,31 @@ const (
   // NetworkKind's ImplementationType exists and is ready in the cluster.
   NetworkKindConditionImplementationTypeReady = "ImplementationTypeReady"
 
- // NetworkKindConditionDefaultNetworkKind indicates whether this NetworkKind has been selected 
- // to be the default for the cluster.
- // This condition is added only when the spec.DefaultNetworkKind is true.
+  // NetworkKindConditionDefaultNetworkKind indicates whether this NetworkKind has been selected 
+  // to be the default for the cluster.
+  // This condition is added only when the spec.DefaultNetworkKind is true.
   NetworkKindConditionDefaultNetworkKind = "DefaultNetworkKind"
 )
 
 // Well-known condition reasons for NetworkKinds.
 const (
-	// NetworkKindReasonCRDNotFound in the ImplementationTypeReady condition indicates
-	// that the CRD referenced by the NetworkKind's ImplementationType does not exist
-	// in the cluster.
-	NetworkKindReasonCRDNotFound string = "CRDNotFound"
-	// NetworkKindReasonCRDNotReady in the ImplementationTypeReady condition indicates
-	// that the CRD referenced by the NetworkKind's ImplementationType exists but is not
-	// yet ready.
-	// Ready means that the CRD has been established, its names have been accepted and it contains
-	// the required categories.
-	NetworkKindReasonCRDNotReady string = "CRDNotReady"
-	// NetworkKindReasonMissingRBAC in the ImplementationTypeReady condition indicates
-	// that the necessary RBAC permissions are missing for the CRD referenced by the
-	// NetworkKind's ImplementationType.
-	NetworkKindReasonMissingRBAC string = "MissingRBAC"
-	// NetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
-	// that the CRD referenced by the NetworkKind's ImplementationType exists and is ready.
-	NetworkKindReasonCompliant string = "Compliant"
+  // NetworkKindReasonCRDNotFound in the ImplementationTypeReady condition indicates
+  // that the CRD referenced by the NetworkKind's ImplementationType does not exist
+  // in the cluster.
+  NetworkKindReasonCRDNotFound string = "CRDNotFound"
+  // NetworkKindReasonCRDNotReady in the ImplementationTypeReady condition indicates
+  // that the CRD referenced by the NetworkKind's ImplementationType exists but is not
+  // yet ready.
+  // Ready means that the CRD has been established, its names have been accepted and it contains
+  // the required categories.
+  NetworkKindReasonCRDNotReady string = "CRDNotReady"
+  // NetworkKindReasonMissingRBAC in the ImplementationTypeReady condition indicates
+  // that the necessary RBAC permissions are missing for the CRD referenced by the
+  // NetworkKind's ImplementationType.
+  NetworkKindReasonMissingRBAC string = "MissingRBAC"
+  // NetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
+  // that the CRD referenced by the NetworkKind's ImplementationType exists and is ready.
+  NetworkKindReasonCompliant string = "Compliant"
 
   // NetworkKindReasonDefaultNetworkKindSet in the DefaultNetworkKind condition indicates
   // that this NetworkKind has been selected to be the default for the cluster.
@@ -219,7 +219,7 @@ Without a common `PodNetwork` API, there is no single resource type that represe
 
 To address this, pod network implementations must register their CRD under the `podnetwork` and `podnetworks` categories. CRD categories allow `kubectl` to aggregate resources of different types under a single alias, enabling users to list all pod networks across all implementations with a single command: `kubectl get podnetworks`.
 
-Here below, an example CRD including the required `categories`:
+Below is an example CRD including the required `categories`:
 ```yaml
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -391,7 +391,7 @@ Here is a diagram below representing the pod creation and its attachment to a po
 
 ![Diagram](images/NetworkKind-2.png)
 
-1. A user creates a Pod and an associated ResourceClaim requesting the attachment to a pod network.
+1. A user creates a Pod and an associated ResourceClaim requesting attachment to a pod network.
 2. The pod network implementation attaches the Pod to the requested pod network.
 3. The pod network implementation reports the attachment status to the ResourceClaim device status.
 
@@ -502,7 +502,7 @@ Conformance tests validate:
   2. Each advertised device includes the following attributes:
     * `multinetwork.networking.k8s.io/podNetwork`, identifying the pod network instance.
     * `multinetwork.networking.k8s.io/networkKind`, identifying the corresponding NetworkKind.
-    * `multinetwork.networking.k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespaced-scoped. This attribute must not exist if the pod network object is cluster-scoped.
+    * `multinetwork.networking.k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespace-scoped. This attribute must not exist if the pod network object is cluster-scoped.
   3. The advertised attributes accurately reflect the pod network object name, namespace (if applicable) and kind.
 * ResourceClaim Pod Network Selection: A pod network implementation must support attaching a Pod to a pod network via ResourceClaim selection using standard device attributes.
   1. A ResourceClaim selecting a pod network via the `multinetwork.networking.k8s.io/podNetwork`, the `multinetwork.networking.k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.k8s.io/networkKind` attributes can be successfully allocated.
@@ -534,7 +534,7 @@ type PodNetwork struct {
   Name *string
 
   // Namespace identifies the namespace of the pod network object.
-  // Optional if the pod network object is a non-namespace object.
+  // Optional if the pod network object is a non-namespace scoped object.
   // +optional
   Namespace *string
 }
@@ -583,9 +583,9 @@ type ServiceStatus struct {
   // +optional
   PodNetwork *PodNetwork
 
-	// Current service condition
-	// +optional
-	Conditions []metav1.Condition
+  // Current service condition
+  // +optional
+  Conditions []metav1.Condition
 }
 ```
 
