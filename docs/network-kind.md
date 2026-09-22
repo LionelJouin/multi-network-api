@@ -43,9 +43,9 @@ type NetworkKindSpec struct {
   // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.ImplementationType is immutable"
   ImplementationType metav1.GroupKind
 
-  // DefaultNetworkKind indicates whether this NetworkKind is the default for the cluster.
-  // If true, this NetworkKind is the default for the cluster and will be used when no specific NetworkKind is specified.
-  // If false, this NetworkKind is not the default for the cluster and will only be used when explicitly requested.
+  // DefaultNetworkKind indicates whether this NetworkKind requests to be the default for the cluster.
+  // If true, this NetworkKind is requesting to be the default for the cluster.
+  // If false, this NetworkKind is not requesting to be the default for the cluster.
   // If not specified, the default is false.
   // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.DefaultNetworkKind is immutable"
   // +optional
@@ -62,7 +62,8 @@ type NetworkKindStatus struct {
 
   // DefaultNetworkKind indicates whether this NetworkKind has been selected to be the default for the cluster.
   // When multiple NetworkKinds have spec.DefaultNetworkKind set to true, the candidate selected as default 
-  // is the oldest NetworkKind determined by metadata.creationTimestamp.
+  // is the oldest NetworkKind determined by metadata.creationTimestamp. If timestamps are equal, the 
+  // candidate selected as default is the one with the first name in the list sorted in alphabetical order.
   // If another NetworkKind is already the active default NetworkKind, this field will be false even if 
   // spec.DefaultNetworkKind is true, and a condition will be set to indicate that the default NetworkKind 
   // is already set.
@@ -91,13 +92,26 @@ const (
   // NetworkKindReasonCRDNotReady in the ImplementationTypeReady condition indicates
   // that the CRD referenced by the NetworkKind's ImplementationType exists but is not
   // yet ready.
-  // Ready means that the CRD has been established, its names have been accepted and it contains
-  // the required categories.
+  // Ready means that the CRD conditions status are reported in the following way for each types:
+  // - Established: True
+  // - NamesAccepted: True
+  // - NonStructuralSchema: False (or non-existent)
+  // - Terminating: False (or non-existent)
+  // - KubernetesAPIApprovalPolicyConformant: True (or non-existent)
+  // For more details, refer to the Kubernetes API documentation for CRD condition types:
+  // https://github.com/kubernetes/apiextensions-apiserver/blob/v0.37.0/pkg/apis/apiextensions/v1/types.go#L305
   NetworkKindReasonCRDNotReady string = "CRDNotReady"
+  // NetworkKindReasonCRDMissingCategories in the ImplementationTypeReady condition indicates
+  // that the CRD referenced by the NetworkKind's ImplementationType exists but is missing
+  // required categories.
+  NetworkKindReasonCRDMissingCategories string = "CRDMissingCategories"
   // NetworkKindReasonMissingRBAC in the ImplementationTypeReady condition indicates
   // that the necessary RBAC permissions are missing for the CRD referenced by the
   // NetworkKind's ImplementationType.
   NetworkKindReasonMissingRBAC string = "MissingRBAC"
+  // NetworkKindReasonTypeConflict in the ImplementationTypeReady condition indicates
+  // that another NetworkKind with the same type already exists in the cluster.
+  NetworkKindReasonTypeConflict string = "TypeConflict"
   // NetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
   // that the CRD referenced by the NetworkKind's ImplementationType exists and is ready.
   NetworkKindReasonCompliant string = "Compliant"
@@ -109,6 +123,13 @@ const (
   // that this NetworkKind cannot be set as the default for the cluster because another 
   // NetworkKind is already set as the default.
   NetworkKindReasonDefaultNetworkKindAlreadySet string = "DefaultNetworkKindAlreadySet"
+)
+
+// Well-known finalizers for NetworkKinds.
+const (
+  // NetworkKindFinalizer is attached to a NetworkKind to prevent deletion
+  // while pod network objects referencing it still exist in the cluster.
+  NetworkKindFinalizer = "multinetwork.networking.x-k8s.io/network-kind-protection"
 )
 ```
 
@@ -443,21 +464,25 @@ status:
 
 ### Implementation
 
-The `NetworkKind` API requires server-side validation to enforce constraints that cannot be expressed through CRD schema validation alone. These constraints involve cross-object uniqueness and referential integrity checks that require knowledge of the cluster state at admission time.
+The `NetworkKind` API enforces lifecycle and referential integrity constraints to ensure proper discovery, default selection, and protection against orphaning pod network objects.
 
 Validation must enforce the following:
 
-* Group/Kind Uniqueness: Two or more `NetworkKind` objects cannot reference the same Group/Kind. On creation of a `NetworkKind`, the webhook must list existing `NetworkKind` objects and reject the request if another `NetworkKind` already references the same Group/Kind. Since `NetworkKind` is immutable, updates to the `spec` are already rejected by CRD-level validation, so this check only applies on create.
-
-* Deletion Protection: A `NetworkKind` cannot be deleted while pod network objects belonging to it still exist. On deletion of a `NetworkKind`, the webhook must check whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the deletion must be rejected. This prevents orphaning pod network objects that would no longer be recognized by any `NetworkKind`.
-
-* Immutability: The `spec` of a `NetworkKind` is immutable once created. Updates to the `spec` field must be rejected. This can be enforced via CRD-level validation rules (e.g., CEL `x-kubernetes-validations`) or through the webhook.
+* Immutability: The `spec` of a `NetworkKind` is immutable once created. Updates to the `spec` field must be rejected. This can be enforced via CRD-level validation rules (e.g., CEL `x-kubernetes-validations`).
 
 A controller must enforce the following:
 
-* ImplementationTypeReady Condition: A controller must watch `NetworkKind` objects and the CRDs in the cluster. For each `NetworkKind`, the controller must look up the CRD matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly. The condition is set to `True` when the CRD exists and is ready. The condition is set to `False` with reason `CRDNotFound` when the CRD does not exist, or `CRDNotReady` when the CRD exists but is not yet ready (conditions Established, NamesAccepted and correct categories set), or `MissingRBAC` when its necessary RBAC permissions are missing.
+* Deletion Protection (Finalizer): A `NetworkKind` cannot be deleted while pod network objects belonging to it still exist. The controller attaches a finalizer (`multinetwork.networking.x-k8s.io/network-kind-protection`) to each `NetworkKind`. When a `NetworkKind` is marked for deletion (`metadata.deletionTimestamp` is set), the controller checks whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the controller retains the finalizer to block deletion. Once all pod network objects belonging to that `NetworkKind` are deleted, the controller removes the finalizer, allowing the deletion to complete.
 
-* DefaultNetworkKind Condition and Status: A controller must manage default `NetworkKind` selection. When one or more `NetworkKind` objects have `spec.defaultNetworkKind: true`, the controller determines the active default by selecting the candidate with the oldest `metadata.creationTimestamp`. For the selected candidate, it sets `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` to `True` with reason `DefaultNetworkKindSet`. For any other candidate requesting default status, it sets `status.defaultNetworkKind: false` and condition `DefaultNetworkKind` to `False` with reason `DefaultNetworkKindAlreadySet`. If the active default is deleted, the controller reconciles remaining candidates with `spec.defaultNetworkKind: true` and promotes the oldest candidate via `metadata.creationTimestamp` to become the new active default.
+* ImplementationTypeReady Condition: A controller must watch `NetworkKind` objects and the CRDs in the cluster. For each `NetworkKind`, the controller must look up the CRD matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly:
+  * The condition is set to `True` with the reason `Compliant` if the other reasons for setting it to `False` do not apply.
+  * The condition is set to `False` with the reason `CRDNotFound` if the CRD does not exist.
+  * The condition is set to `False` with the reason `CRDNotReady` if the CRD exists but is not yet ready (conditions `Established` (True), `NamesAccepted` (True), `NonStructuralSchema` (False or non-existent), `Terminating` (False or non-existent), `KubernetesAPIApprovalPolicyConformant` (True or non-existent)).
+  * The condition is set to `False` with the reason `CRDMissingCategories` if the CRD exists and is ready but is missing the `podnetwork` or `podnetworks` categories.
+  * The condition is set to `False` with the reason `MissingRBAC` if the necessary RBAC permissions are missing.
+  * The condition is set to `False` with the reason `TypeConflict` if another `NetworkKind` already references the same Group/Kind.
+
+* DefaultNetworkKind Condition and Status: A controller must manage default `NetworkKind` selection. When one or more `NetworkKind` objects have `spec.defaultNetworkKind: true`, the controller determines the active default by selecting the candidate with the oldest `metadata.creationTimestamp`. If timestamps are equal, the candidate selected as default is the one with the first name in the list sorted in alphabetical order. For the selected candidate, it sets `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` to `True` with reason `DefaultNetworkKindSet`. For any other candidate requesting default status, it sets `status.defaultNetworkKind: false` and condition `DefaultNetworkKind` to `False` with reason `DefaultNetworkKindAlreadySet`. If the active default is deleted, the controller reconciles remaining candidates with `spec.defaultNetworkKind: true` and promotes the oldest candidate via `metadata.creationTimestamp` (with alphabetical tie-breaking) to become the new active default. For NetworkKinds where `spec.defaultNetworkKind` is false or omitted, the `DefaultNetworkKind` condition is not added.
 
 #### E2E Tests
 
@@ -466,28 +491,34 @@ E2E tests validate that the `NetworkKind` lifecycle and validation constraints a
 E2E tests validate:
 * Group/Kind Uniqueness:
   1. Creating a `NetworkKind` referencing a Group/Kind succeeds when no other `NetworkKind` references the same Group/Kind.
-  2. Creating a second `NetworkKind` referencing the same Group/Kind as an existing `NetworkKind` is rejected.
-  3. After deleting the first `NetworkKind`, creating a new `NetworkKind` referencing the same Group/Kind succeeds.
+  2. Creating a second `NetworkKind` referencing the same Group/Kind as an existing `NetworkKind` results in `ImplementationTypeReady` condition set to `False` with reason `TypeConflict`.
+  3. After deleting the first `NetworkKind`, the second `NetworkKind` has its `ImplementationTypeReady` condition updated to `True` (assuming CRD is ready).
 * Deletion Protection:
-  1. Deleting a `NetworkKind` succeeds when no pod network objects of the referenced Group/Kind exist.
-  2. Deleting a `NetworkKind` is rejected when at least one pod network object of the referenced Group/Kind exists in the cluster.
-  3. After deleting all pod network objects of the referenced Group/Kind, deleting the `NetworkKind` succeeds.
+  1. Creating a `NetworkKind` results in the controller attaching the `multinetwork.networking.x-k8s.io/network-kind-protection` finalizer.
+  2. Deleting a `NetworkKind` succeeds (finalizer is removed) when no pod network objects of the referenced Group/Kind exist.
+  3. Deleting a `NetworkKind` is blocked (finalizer is retained) when at least one pod network object of the referenced Group/Kind exists in the cluster.
+  4. After deleting all pod network objects of the referenced Group/Kind, the controller removes the finalizer and deleting the `NetworkKind` completes.
 * Immutability:
-  1. Updating the `spec` of an existing `NetworkKind` (e.g., changing the Group/Kind) is rejected.
-  2. Updating the `metadata` (e.g., labels, annotations) of an existing `NetworkKind` succeeds.
+  1. Updating the `spec.implementationType` of an existing `NetworkKind` (e.g., changing the Group/Kind) is rejected.
+  2. Updating the `spec.defaultNetworkKind` of an existing `NetworkKind` is rejected.
+  3. Updating the `metadata` (e.g., labels, annotations) of an existing `NetworkKind` succeeds.
 * ImplementationTypeReady Condition:
-  1. Creating a `NetworkKind` referencing an existing and ready CRD results in the `ImplementationTypeReady` condition being set to `True`.
+  1. Creating a `NetworkKind` referencing an existing and ready CRD results in the `ImplementationTypeReady` condition being set to `True` with reason `Compliant`.
   2. Creating a `NetworkKind` referencing a non-existent CRD results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotFound`.
   3. Deleting the CRD referenced by a `NetworkKind` results in the `ImplementationTypeReady` condition being updated to `False` with reason `CRDNotFound`.
   4. Creating the CRD referenced by a `NetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
   5. Creating a `NetworkKind` referencing a CRD that exists but is not yet ready results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotReady`.
-  6. Creating a `NetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
-  7. Granting sufficient RBAC permissions to a `NetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
+  6. Creating a `NetworkKind` referencing a ready CRD that is missing required categories (`podnetwork` / `podnetworks`) results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDMissingCategories`.
+  7. Updating the CRD to include the required categories updates the `ImplementationTypeReady` condition to `True` with reason `Compliant`.
+  8. Creating a `NetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
+  9. Granting sufficient RBAC permissions to a `NetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
 * DefaultNetworkKind Condition:
-  1. Creating a `NetworkKind` with `spec.defaultNetworkKind: true` when no default exists results in `status.defaultNetworkKind: true` and `DefaultNetworkKind` condition set to `True` with reason `DefaultNetworkKindSet`.
-  2. Creating subsequent `NetworkKind` objects (e.g., NetworkKind B and NetworkKind C) with `spec.defaultNetworkKind: true` while an active default (NetworkKind A) exists results in both NetworkKind B and C having `status.defaultNetworkKind: false` and `DefaultNetworkKind` condition set to `False` with reason `DefaultNetworkKindAlreadySet`.
-  3. Deleting the active default `NetworkKind` (A) when multiple NetworkKinds remain (NetworkKind B created before NetworkKind C) results in NetworkKind B (the oldest remaining NetworkKind by `metadata.creationTimestamp`) being promoted to `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` updated to `True` with reason `DefaultNetworkKindSet`, while NetworkKind C remains `status.defaultNetworkKind: false` with reason `DefaultNetworkKindAlreadySet`.
-  4. Deleting NetworkKind B results in NetworkKind C being promoted to `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` updated to `True` with reason `DefaultNetworkKindSet`.
+  1. Creating a `NetworkKind` with `spec.defaultNetworkKind: false` or omitted results in no `DefaultNetworkKind` condition being added and `status.defaultNetworkKind` not set to `true`.
+  2. Creating a `NetworkKind` with `spec.defaultNetworkKind: true` when no default exists results in `status.defaultNetworkKind: true` and `DefaultNetworkKind` condition set to `True` with reason `DefaultNetworkKindSet`.
+  3. Creating subsequent `NetworkKind` objects (e.g., NetworkKind B and NetworkKind C) with `spec.defaultNetworkKind: true` while an active default (NetworkKind A) exists results in both NetworkKind B and C having `status.defaultNetworkKind: false` and `DefaultNetworkKind` condition set to `False` with reason `DefaultNetworkKindAlreadySet`.
+  4. Creating two `NetworkKind` objects with `spec.defaultNetworkKind: true` and identical `metadata.creationTimestamp` results in the one with alphabetically earlier name being selected as default.
+  5. Deleting the active default `NetworkKind` (A) when multiple NetworkKinds remain (NetworkKind B created before NetworkKind C) results in NetworkKind B (the oldest remaining NetworkKind by `metadata.creationTimestamp`) being promoted to `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` updated to `True` with reason `DefaultNetworkKindSet`, while NetworkKind C remains `status.defaultNetworkKind: false` with reason `DefaultNetworkKindAlreadySet`.
+  6. Deleting NetworkKind B results in NetworkKind C being promoted to `status.defaultNetworkKind: true` and condition `DefaultNetworkKind` updated to `True` with reason `DefaultNetworkKindSet`.
 
 #### Conformance Tests
 
