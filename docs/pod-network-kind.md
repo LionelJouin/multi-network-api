@@ -462,6 +462,35 @@ status:
     message: "Another PodNetworkKind is already set as the default for the cluster."
 ```
 
+An example `DeviceClass` that selects the default `PodNetworkKind`, an administrator would create to ensure the current default is always selected:
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: default-network-kind
+spec:
+  selectors:
+  - cel:
+      expression: device.attributes["multinetwork.networking.k8s.io"].podNetworkKind == "userdefinednetwork" && has(device.attributes["multinetwork.networking.k8s.io"].podNetwork)
+```
+
+An example `ResourceClaim` that requests a device from the default `PodNetworkKind`:
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: blue-network-attachment
+spec:
+  devices:
+    requests:
+    - name: blue-network
+      exactly:
+        deviceClassName: default-network-kind
+        selectors:
+          - cel:
+              expression: device.attributes["multinetwork.networking.k8s.io"].podNetwork == "blue-network"
+```
+
 ### Implementation
 
 The `PodNetworkKind` API enforces lifecycle and referential integrity constraints to ensure proper discovery, default selection, and protection against orphaning pod network objects.
@@ -627,6 +656,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: my-service
+  namespace: default
 spec:
   podNetwork:
     name: blue-network
@@ -640,6 +670,7 @@ status:
   podNetwork:
     kind: userdefinednetwork # userdefinednetwork is the default PodNetworkKind in this example, the status.Kind is resolved and set by a controller.
     name: blue-network
+    namespace: default # The namespace was omitted in the spec, but resolved automatically in the status by a controller.
 ```
 
 ## Alternatives
