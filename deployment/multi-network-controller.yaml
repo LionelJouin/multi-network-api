@@ -29,7 +29,7 @@ rules:
 - apiGroups: ["multinetwork.networking.x-k8s.io"]
   resources: ["podnetworkkinds"]
   verbs: ["get", "list", "watch"]
-apiGroups: ["multinetwork.networking.x-k8s.io"]
+- apiGroups: ["multinetwork.networking.x-k8s.io"]
   resources: ["podnetworkkinds/status"]
   verbs: ["update", "patch"]
 - apiGroups: [""]

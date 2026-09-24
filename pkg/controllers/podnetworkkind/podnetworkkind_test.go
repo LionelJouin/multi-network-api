@@ -18,6 +18,7 @@ package podnetworkkind
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
 	podNetworkKindFake "github.com/kubernetes-sigs/multi-network-api/pkg/client/clientset/versioned/fake"
 	podNetworkKindInformers "github.com/kubernetes-sigs/multi-network-api/pkg/client/informers/externalversions"
+	"github.com/kubernetes-sigs/multi-network-api/pkg/ruleswatcher"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsFake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 )
 
 // fakeReconciler is a simple implementation of the reconciler interface for testing purposes.
@@ -41,13 +44,20 @@ import (
 type fakeReconciler struct {
 	mu                  sync.Mutex
 	podNetworkKindNames []string
+	reconcileErr        error
 }
 
 func (f *fakeReconciler) Reconcile(_ context.Context, podNetworkKindName string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.podNetworkKindNames = append(f.podNetworkKindNames, podNetworkKindName)
-	return nil
+	return f.reconcileErr
+}
+
+func (f *fakeReconciler) setReconcileErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconcileErr = err
 }
 
 func (f *fakeReconciler) getPodNetworkKindNames() []string {
@@ -71,10 +81,14 @@ func newController(
 	podNetworkKindInformerFactory := podNetworkKindInformers.NewSharedInformerFactory(fakeMultiNetworkClient, 0)
 	apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(fakeApiExtensionsClient, 0)
 
+	ruleWatcher := ruleswatcher.New(fakeKubeClient)
+	_ = ruleWatcher.Sync(ctx)
+
 	controller, err := NewPodNetworkKindController(
 		podNetworkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds(),
 		apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
 		fakeMultiNetworkClient.MultinetworkV1alpha1().PodNetworkKinds(),
+		ruleWatcher,
 		fakeKubeClient,
 	)
 	if err != nil {
@@ -158,6 +172,22 @@ func TestEventHandlers(t *testing.T) {
 			expectedPodNetworkKindNames: []string{"example-com-mynetwork"},
 		},
 		{
+			name: "update PodNetworkKind",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-network-kind"}},
+			},
+			initialExpectedPodNetworkKindNames: []string{"my-network-kind"},
+			updateObjects: []object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "my-network-kind",
+						Labels: map[string]string{"updated": "true"},
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"my-network-kind", "my-network-kind"},
+		},
+		{
 			name: "delete PodNetworkKind",
 			initialPodNetworkKindObjects: []runtime.Object{
 				&v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-network-kind"}},
@@ -166,7 +196,7 @@ func TestEventHandlers(t *testing.T) {
 			deleteObjects: []object{
 				&v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-network-kind"}},
 			},
-			expectedPodNetworkKindNames: []string{"my-network-kind"},
+			expectedPodNetworkKindNames: []string{"my-network-kind", "my-network-kind"},
 		},
 		{
 			name: "delete CustomResourceDefinition",
@@ -189,7 +219,7 @@ func TestEventHandlers(t *testing.T) {
 					},
 				},
 			},
-			expectedPodNetworkKindNames: []string{"example-com-mynetwork"},
+			expectedPodNetworkKindNames: []string{"example-com-mynetwork", "example-com-mynetwork"},
 		},
 		{
 			name: "update CustomResourceDefinition enqueues both old and new names",
@@ -212,7 +242,7 @@ func TestEventHandlers(t *testing.T) {
 					},
 				},
 			},
-			expectedPodNetworkKindNames: []string{"old-example-com-oldnetwork", "new-example-com-newnetwork"},
+			expectedPodNetworkKindNames: []string{"old-example-com-oldnetwork", "old-example-com-oldnetwork", "new-example-com-newnetwork"},
 		},
 		{
 			name: "multiple initial PodNetworkKinds",
@@ -328,5 +358,343 @@ func TestEventHandlers(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNewPodNetworkKindController(t *testing.T) {
+	t.Run("successful controller initialization", func(t *testing.T) {
+		fakeKubeClient := fake.NewSimpleClientset()
+		fakeMultiNetworkClient := podNetworkKindFake.NewSimpleClientset()
+		fakeApiExtensionsClient := apiextensionsFake.NewSimpleClientset()
+
+		podNetworkKindInformerFactory := podNetworkKindInformers.NewSharedInformerFactory(fakeMultiNetworkClient, 0)
+		apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(fakeApiExtensionsClient, 0)
+
+		ruleWatcher := ruleswatcher.New(fakeKubeClient)
+
+		controller, err := NewPodNetworkKindController(
+			podNetworkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds(),
+			apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
+			fakeMultiNetworkClient.MultinetworkV1alpha1().PodNetworkKinds(),
+			ruleWatcher,
+			fakeKubeClient,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if controller == nil {
+			t.Fatal("expected controller to be non-nil")
+		}
+		if controller.podNetworkKindQueue == nil {
+			t.Fatal("expected podNetworkKindQueue to be non-nil")
+		}
+		if controller.podNetworkKindReconciler == nil {
+			t.Fatal("expected podNetworkKindReconciler to be non-nil")
+		}
+	})
+
+	t.Run("error when adding indexer fails", func(t *testing.T) {
+		fakeKubeClient := fake.NewSimpleClientset()
+		fakeMultiNetworkClient := podNetworkKindFake.NewSimpleClientset()
+		fakeApiExtensionsClient := apiextensionsFake.NewSimpleClientset()
+
+		podNetworkKindInformerFactory := podNetworkKindInformers.NewSharedInformerFactory(fakeMultiNetworkClient, 0)
+		apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(fakeApiExtensionsClient, 0)
+
+		crdInformer := apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions()
+		err := crdInformer.Informer().GetIndexer().AddIndexers(cache.Indexers{
+			groupKindCustomResourceDefinitionIndex: func(obj interface{}) ([]string, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to add indexer: %v", err)
+		}
+
+		ruleWatcher := ruleswatcher.New(fakeKubeClient)
+
+		controller, err := NewPodNetworkKindController(
+			podNetworkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds(),
+			crdInformer,
+			fakeMultiNetworkClient.MultinetworkV1alpha1().PodNetworkKinds(),
+			ruleWatcher,
+			fakeKubeClient,
+		)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if controller != nil {
+			t.Fatal("expected controller to be nil on error")
+		}
+	})
+}
+
+func TestEnqueuePodNetworkKind(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	_, _, _, controller, _ := newController(ctx, t, nil, nil)
+
+	t.Run("valid PodNetworkKind", func(t *testing.T) {
+		pnk := &v1alpha1.PodNetworkKind{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-network-kind"},
+		}
+		controller.enqueuePodNetworkKind(pnk)
+
+		if controller.podNetworkKindQueue.Len() != 1 {
+			t.Fatalf("expected queue length 1, got %d", controller.podNetworkKindQueue.Len())
+		}
+		key, _ := controller.podNetworkKindQueue.Get()
+		if key != "my-network-kind" {
+			t.Errorf("expected key %q, got %q", "my-network-kind", key)
+		}
+		controller.podNetworkKindQueue.Done(key)
+	})
+
+	t.Run("invalid object type", func(t *testing.T) {
+		controller.enqueuePodNetworkKind("not-a-pod-network-kind")
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
+		}
+	})
+}
+
+func TestOnCustomResourceDefinitionEvent(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	_, _, _, controller, _ := newController(ctx, t, nil, nil)
+
+	t.Run("both nil", func(t *testing.T) {
+		controller.onCustomResourceDefinitionEvent(nil, nil)
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
+		}
+	})
+
+	t.Run("create event (nil old, non-nil new)", func(t *testing.T) {
+		crd := &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+			},
+		}
+		controller.onCustomResourceDefinitionEvent(nil, crd)
+		if controller.podNetworkKindQueue.Len() != 1 {
+			t.Fatalf("expected queue length 1, got %d", controller.podNetworkKindQueue.Len())
+		}
+		key, _ := controller.podNetworkKindQueue.Get()
+		expected := v1alpha1.GetPodNetworkKindName("example.com", "MyNetwork")
+		if key != expected {
+			t.Errorf("expected key %q, got %q", expected, key)
+		}
+		controller.podNetworkKindQueue.Done(key)
+	})
+
+	t.Run("delete event (non-nil old, nil new)", func(t *testing.T) {
+		crd := &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+			},
+		}
+		controller.onCustomResourceDefinitionEvent(crd, nil)
+		if controller.podNetworkKindQueue.Len() != 1 {
+			t.Fatalf("expected queue length 1, got %d", controller.podNetworkKindQueue.Len())
+		}
+		key, _ := controller.podNetworkKindQueue.Get()
+		expected := v1alpha1.GetPodNetworkKindName("example.com", "MyNetwork")
+		if key != expected {
+			t.Errorf("expected key %q, got %q", expected, key)
+		}
+		controller.podNetworkKindQueue.Done(key)
+	})
+
+	t.Run("update event (non-nil old and new)", func(t *testing.T) {
+		oldCRD := &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "old.example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "OldKind"},
+			},
+		}
+		newCRD := &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "new.example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "NewKind"},
+			},
+		}
+		controller.onCustomResourceDefinitionEvent(oldCRD, newCRD)
+		if controller.podNetworkKindQueue.Len() != 2 {
+			t.Fatalf("expected queue length 2, got %d", controller.podNetworkKindQueue.Len())
+		}
+		key1, _ := controller.podNetworkKindQueue.Get()
+		controller.podNetworkKindQueue.Done(key1)
+		key2, _ := controller.podNetworkKindQueue.Get()
+		controller.podNetworkKindQueue.Done(key2)
+
+		expectedOld := v1alpha1.GetPodNetworkKindName("old.example.com", "OldKind")
+		expectedNew := v1alpha1.GetPodNetworkKindName("new.example.com", "NewKind")
+		keys := []string{key1, key2}
+		if !((keys[0] == expectedOld && keys[1] == expectedNew) || (keys[0] == expectedNew && keys[1] == expectedOld)) {
+			t.Errorf("expected keys [%s, %s], got %v", expectedOld, expectedNew, keys)
+		}
+	})
+
+	t.Run("invalid object type", func(t *testing.T) {
+		controller.onCustomResourceDefinitionEvent("invalid-old", nil)
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
+		}
+
+		controller.onCustomResourceDefinitionEvent(nil, "invalid-new")
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
+		}
+	})
+}
+
+func TestRun(t *testing.T) {
+	t.Run("cache sync failure", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		_, _, _, controller, _ := newController(ctx, t, nil, nil)
+		controller.podNetworkKindSynced = func() bool { return false }
+
+		canceledCtx, cancelImmediate := context.WithCancel(context.Background())
+		cancelImmediate()
+
+		err := controller.Run(canceledCtx, 1)
+		if err == nil {
+			t.Fatal("expected error waiting for caches to sync, got nil")
+		}
+		expectedMsg := "failed to wait for caches to sync"
+		if err.Error() != expectedMsg {
+			t.Errorf("expected error %q, got %q", expectedMsg, err.Error())
+		}
+	})
+
+	t.Run("worker execution and shutdown", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+
+		_, _, _, controller, fr := newController(ctx, t, nil, nil)
+
+		runErrCh := make(chan error, 1)
+		go func() {
+			runErrCh <- controller.Run(ctx, 2)
+		}()
+
+		controller.podNetworkKindQueue.Add("test-item")
+
+		if err := wait.PollUntilContextTimeout(ctx, 1*time.Millisecond, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+			names := fr.getPodNetworkKindNames()
+			return len(names) == 1 && names[0] == "test-item", nil
+		}); err != nil {
+			t.Fatalf("timed out waiting for worker to process item, got: %v", fr.getPodNetworkKindNames())
+		}
+
+		cancel()
+
+		select {
+		case err := <-runErrCh:
+			if err != nil {
+				t.Fatalf("unexpected error from Run: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for Run to exit after context cancellation")
+		}
+
+		if !controller.podNetworkKindQueue.ShuttingDown() {
+			t.Error("expected queue to be shut down")
+		}
+	})
+}
+
+func TestProcessNextWorkItem(t *testing.T) {
+	t.Run("queue shutdown returns false", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		_, _, _, controller, _ := newController(ctx, t, nil, nil)
+		controller.podNetworkKindQueue.ShutDown()
+
+		result := controller.processNextWorkItem(ctx)
+		if result != false {
+			t.Errorf("expected false on shutdown, got %v", result)
+		}
+	})
+
+	t.Run("reconcile succeeds", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		_, _, _, controller, fr := newController(ctx, t, nil, nil)
+		fr.setReconcileErr(nil)
+
+		controller.podNetworkKindQueue.Add("success-pnk")
+
+		result := controller.processNextWorkItem(ctx)
+		if result != true {
+			t.Errorf("expected true, got %v", result)
+		}
+
+		names := fr.getPodNetworkKindNames()
+		if len(names) != 1 || names[0] != "success-pnk" {
+			t.Errorf("expected reconciler to be called with %q, got: %v", "success-pnk", names)
+		}
+
+		if controller.podNetworkKindQueue.NumRequeues("success-pnk") != 0 {
+			t.Errorf("expected NumRequeues to be 0 after Forget, got %d", controller.podNetworkKindQueue.NumRequeues("success-pnk"))
+		}
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Errorf("expected queue to be empty, got length %d", controller.podNetworkKindQueue.Len())
+		}
+	})
+
+	t.Run("reconcile returns error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		_, _, _, controller, fr := newController(ctx, t, nil, nil)
+		expectedErr := fmt.Errorf("reconciliation error")
+		fr.setReconcileErr(expectedErr)
+
+		controller.podNetworkKindQueue.Add("error-pnk")
+
+		result := controller.processNextWorkItem(ctx)
+		if result != true {
+			t.Errorf("expected true, got %v", result)
+		}
+
+		names := fr.getPodNetworkKindNames()
+		if len(names) != 1 || names[0] != "error-pnk" {
+			t.Errorf("expected reconciler to be called with %q, got: %v", "error-pnk", names)
+		}
+
+		if controller.podNetworkKindQueue.NumRequeues("error-pnk") != 1 {
+			t.Errorf("expected NumRequeues to be 1 after AddRateLimited, got %d", controller.podNetworkKindQueue.NumRequeues("error-pnk"))
+		}
+	})
+}
+
+func TestEnqueueAllPodNetworkKinds(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	initialPNK1 := &v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "pnk-1"}}
+	initialPNK2 := &v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "pnk-2"}}
+
+	_, _, _, controller, _ := newController(ctx, t, []runtime.Object{initialPNK1, initialPNK2}, nil)
+
+	// Clear items from queue
+	for controller.podNetworkKindQueue.Len() > 0 {
+		item, _ := controller.podNetworkKindQueue.Get()
+		controller.podNetworkKindQueue.Done(item)
+	}
+
+	controller.enqueueAllPodNetworkKinds()
+
+	if controller.podNetworkKindQueue.Len() != 2 {
+		t.Fatalf("expected queue length 2, got %d", controller.podNetworkKindQueue.Len())
 	}
 }

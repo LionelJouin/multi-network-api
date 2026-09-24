@@ -25,6 +25,7 @@ import (
 	podNetworkKindClientset "github.com/kubernetes-sigs/multi-network-api/pkg/client/clientset/versioned"
 	podNetworkKindInformers "github.com/kubernetes-sigs/multi-network-api/pkg/client/informers/externalversions"
 	"github.com/kubernetes-sigs/multi-network-api/pkg/controllers/podnetworkkind"
+	"github.com/kubernetes-sigs/multi-network-api/pkg/ruleswatcher"
 	"github.com/spf13/cobra"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
@@ -93,10 +94,13 @@ func (ro *runOptions) run(ctx context.Context) error {
 	informerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, defaultInformerResyncPeriod)
 	apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(apiextensionsClient, defaultInformerResyncPeriod)
 
+	ruleWatcher := ruleswatcher.New(kubeClient)
+
 	podNetworkKindController, err := podnetworkkind.NewPodNetworkKindController(
 		networkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds(),
 		apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
 		podNetworkKindClient.MultinetworkV1alpha1().PodNetworkKinds(),
+		ruleWatcher,
 		kubeClient,
 	)
 	if err != nil {
@@ -129,6 +133,13 @@ func (ro *runOptions) run(ctx context.Context) error {
 	networkKindInformerFactory.WaitForCacheSync(ctx.Done())
 	informerFactory.WaitForCacheSync(ctx.Done())
 	apiextensionsInformerFactory.WaitForCacheSync(ctx.Done())
+
+	go func() {
+		err = ruleWatcher.Run(ctx)
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			klog.FromContext(ctx).Error(err, "failed to run rule watcher")
+		}
+	}()
 
 	go func() {
 		err = podNetworkKindController.Run(ctx, 1)

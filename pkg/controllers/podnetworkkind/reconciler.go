@@ -23,7 +23,7 @@ import (
 	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
 	v1alpha1client "github.com/kubernetes-sigs/multi-network-api/pkg/client/clientset/versioned/typed/apis/v1alpha1"
 	v1alpha1networkkindlisters "github.com/kubernetes-sigs/multi-network-api/pkg/client/listers/apis/v1alpha1"
-	authv1 "k8s.io/api/authorization/v1"
+	"github.com/kubernetes-sigs/multi-network-api/pkg/ruleswatcher"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	v1apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -43,6 +43,7 @@ type PodNetworkKindReconciler struct {
 	customResourceDefinitionIndexer cache.Indexer
 	podNetworkKindLister            v1alpha1networkkindlisters.PodNetworkKindLister
 	podNetworkKindClient            v1alpha1client.PodNetworkKindInterface
+	ruleWatcher                     ruleswatcher.Interface
 	clientset                       clientset.Interface
 }
 
@@ -50,12 +51,14 @@ func NewPodNetworkKindReconciler(
 	customResourceDefinitionInformer v1apiextensionsinformers.CustomResourceDefinitionInformer,
 	podNetworkKindLister v1alpha1networkkindlisters.PodNetworkKindLister,
 	podNetworkKindClient v1alpha1client.PodNetworkKindInterface,
+	ruleWatcher ruleswatcher.Interface,
 	clientset clientset.Interface,
 ) (*PodNetworkKindReconciler, error) {
 	nkr := &PodNetworkKindReconciler{
 		customResourceDefinitionIndexer: customResourceDefinitionInformer.Informer().GetIndexer(),
 		podNetworkKindLister:            podNetworkKindLister,
 		podNetworkKindClient:            podNetworkKindClient,
+		ruleWatcher:                     ruleWatcher,
 		clientset:                       clientset,
 	}
 
@@ -103,7 +106,7 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 		}
 	}
 
-	err = pnkr.setConditions(ctx, podNetworkKind, crd)
+	err = pnkr.setConditions(podNetworkKind, crd)
 	if err != nil {
 		return fmt.Errorf("failed to set conditions: %w", err)
 	}
@@ -118,7 +121,7 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 	return nil
 }
 
-func (pnkr *PodNetworkKindReconciler) setConditions(ctx context.Context, podNetworkKind *v1alpha1.PodNetworkKind, crd *apiextensionsv1.CustomResourceDefinition) error {
+func (pnkr *PodNetworkKindReconciler) setConditions(podNetworkKind *v1alpha1.PodNetworkKind, crd *apiextensionsv1.CustomResourceDefinition) error {
 	podNetworkKind.Status.Conditions = []metav1.Condition{
 		{
 			Type:               v1alpha1.PodNetworkKindConditionImplementationTypeReady,
@@ -153,10 +156,7 @@ func (pnkr *PodNetworkKindReconciler) setConditions(ctx context.Context, podNetw
 		return nil
 	}
 
-	allowed, err := pnkr.hasPermissions(ctx, crd)
-	if err != nil {
-		return err
-	}
+	allowed := pnkr.hasPermissions(crd)
 	if !allowed {
 		podNetworkKind.Status.Conditions[0].Status = metav1.ConditionFalse
 		podNetworkKind.Status.Conditions[0].Message = "Insufficient permissions to access the Custom Resources"
@@ -237,23 +237,6 @@ func hasStatusChanged(oldPodNetworkKind *v1alpha1.PodNetworkKind, newPodNetworkK
 	return false
 }
 
-func (pnkr *PodNetworkKindReconciler) hasPermissions(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) (bool, error) {
-	review := &authv1.SelfSubjectAccessReview{
-		Spec: authv1.SelfSubjectAccessReviewSpec{
-			ResourceAttributes: &authv1.ResourceAttributes{
-				Group:    crd.Spec.Group,
-				Resource: crd.Spec.Names.Plural,
-				Verb:     "list",
-			},
-		},
-	}
-
-	result, err := pnkr.clientset.AuthorizationV1().
-		SelfSubjectAccessReviews().
-		Create(ctx, review, metav1.CreateOptions{})
-	if err != nil {
-		return false, fmt.Errorf("failed to create SelfSubjectAccessReview: %w", err)
-	}
-
-	return result.Status.Allowed, nil
+func (pnkr *PodNetworkKindReconciler) hasPermissions(crd *apiextensionsv1.CustomResourceDefinition) bool {
+	return pnkr.ruleWatcher.HasPermission("list", crd.Spec.Group, crd.Spec.Names.Plural)
 }
