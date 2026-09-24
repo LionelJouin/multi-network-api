@@ -23,6 +23,9 @@ spec:
     - jsonPath: .spec.implementationType.kind
       name: Kind
       type: string
+    - jsonPath: .status.defaultPodNetworkKind
+      name: Default
+      type: boolean
     name: v1alpha1
     schema:
       openAPIV3Schema:

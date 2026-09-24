@@ -26,6 +26,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.implementationType.group`
 // +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.implementationType.kind`
+// +kubebuilder:printcolumn:name="Default",type=boolean,JSONPath=`.status.defaultPodNetworkKind`
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PodNetworkKind describes a kind of pod networks implemented

@@ -21,6 +21,11 @@ all: verify build-image
 verify:
 	hack/verify-all.sh
 
+.PHONY: test
+test:
+	@mkdir -p _output
+	go test $$(go list ./... | grep -v /test/e2e) -race -count=1 -coverprofile=_output/coverage.out
+
 .PHONY: .build-image
 build-image:
 	docker build -t multi-network-controller:$(VERSION) -f ./build/multi-network-controller/Dockerfile .
