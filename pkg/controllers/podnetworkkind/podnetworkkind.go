@@ -91,9 +91,9 @@ func NewPodNetworkKindController(
 	}
 
 	if _, err := podNetworkKindInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    nkc.enqueuePodNetworkKind,
-		UpdateFunc: func(_, newObj interface{}) { nkc.enqueuePodNetworkKind(newObj) },
-		DeleteFunc: nkc.enqueuePodNetworkKind,
+		AddFunc:    nkc.onPodNetworkKindEvent,
+		UpdateFunc: func(oldObj, newObj interface{}) { nkc.onPodNetworkKindEvent(newObj) },
+		DeleteFunc: nkc.onPodNetworkKindEvent,
 	}); err != nil {
 		return nil, err
 	}
@@ -113,6 +113,29 @@ func NewPodNetworkKindController(
 	return nkc, nil
 }
 
+func (pnkc *PodNetworkKindController) onPodNetworkKindEvent(obj interface{}) {
+	pnkc.enqueuePodNetworkKind(obj)
+
+	pnk, ok := obj.(*v1alpha1.PodNetworkKind)
+	if ok && pnk.Spec.DefaultPodNetworkKind != nil && *pnk.Spec.DefaultPodNetworkKind {
+		pnkc.enqueueAllDefaultCandidates()
+	}
+}
+
+func (pnkc *PodNetworkKindController) enqueueAllDefaultCandidates() {
+	networkKinds, err := pnkc.podNetworkKindLister.List(labels.Everything())
+	if err != nil {
+		klog.Error(err, "Failed to list PodNetworkKinds")
+		return
+	}
+
+	for _, nk := range networkKinds {
+		if nk.Spec.DefaultPodNetworkKind != nil && *nk.Spec.DefaultPodNetworkKind {
+			pnkc.podNetworkKindQueue.Add(nk.Name)
+		}
+	}
+}
+
 func (pnkc *PodNetworkKindController) enqueueAllPodNetworkKinds() {
 	networkKinds, err := pnkc.podNetworkKindLister.List(labels.Everything())
 	if err != nil {
@@ -126,8 +149,18 @@ func (pnkc *PodNetworkKindController) enqueueAllPodNetworkKinds() {
 }
 
 func (pnkc *PodNetworkKindController) enqueuePodNetworkKind(obj interface{}) {
-	networkKind, ok := obj.(*v1alpha1.PodNetworkKind)
-	if !ok {
+	var networkKind *v1alpha1.PodNetworkKind
+	switch t := obj.(type) {
+	case *v1alpha1.PodNetworkKind:
+		networkKind = t
+	case cache.DeletedFinalStateUnknown:
+		var ok bool
+		networkKind, ok = t.Obj.(*v1alpha1.PodNetworkKind)
+		if !ok {
+			klog.Error(nil, "Expected PodNetworkKind in tombstone", "actual", fmt.Sprintf("%T", t.Obj))
+			return
+		}
+	default:
 		klog.Error(nil, "Expected PodNetworkKind", "actual", fmt.Sprintf("%T", obj))
 		return
 	}
@@ -141,8 +174,18 @@ func (pnkc *PodNetworkKindController) onCustomResourceDefinitionEvent(oldObj, ne
 			continue
 		}
 
-		crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
-		if !ok {
+		var crd *apiextensionsv1.CustomResourceDefinition
+		switch t := obj.(type) {
+		case *apiextensionsv1.CustomResourceDefinition:
+			crd = t
+		case cache.DeletedFinalStateUnknown:
+			var ok bool
+			crd, ok = t.Obj.(*apiextensionsv1.CustomResourceDefinition)
+			if !ok {
+				klog.Error(nil, "Expected CustomResourceDefinition in tombstone", "actual", fmt.Sprintf("%T", t.Obj))
+				return
+			}
+		default:
 			klog.Error(nil, "Expected CustomResourceDefinition", "actual", fmt.Sprintf("%T", obj))
 			return
 		}

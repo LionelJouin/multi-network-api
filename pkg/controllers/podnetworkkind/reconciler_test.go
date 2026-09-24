@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -36,6 +37,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/ptr"
 )
 
 func newReconciler(
@@ -335,6 +337,125 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 					Reason:  v1alpha1.PodNetworkKindReasonCompliant,
 					Message: "",
 				}}
+				return nk
+			}(),
+		},
+		{
+			name: "default PodNetworkKind selected when requested and sole candidate",
+			initialPodNetworkKindObjects: []runtime.Object{func() *v1alpha1.PodNetworkKind {
+				nk := podNetworkKindObj()
+				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+				return nk
+			}()},
+			initialCRDObjects:   []runtime.Object{readyCRD()},
+			fakeKubeClientSetup: allowRules,
+			podNetworkKindName:  "example-com-mynetwork",
+			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
+				nk := podNetworkKindObj()
+				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+				nk.Status.DefaultPodNetworkKind = ptr.To(true)
+				nk.Status.Conditions = []metav1.Condition{
+					{
+						Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+						Status:  metav1.ConditionTrue,
+						Reason:  v1alpha1.PodNetworkKindReasonCompliant,
+						Message: "",
+					},
+					{
+						Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+						Status:  metav1.ConditionTrue,
+						Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
+						Message: "",
+					},
+				}
+				return nk
+			}(),
+		},
+		{
+			name: "default PodNetworkKind already set by older candidate",
+			initialPodNetworkKindObjects: []runtime.Object{
+				func() *v1alpha1.PodNetworkKind {
+					nk := podNetworkKindObj()
+					nk.Name = "older-candidate"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+					return nk
+				}(),
+				func() *v1alpha1.PodNetworkKind {
+					nk := podNetworkKindObj()
+					nk.Name = "younger-candidate"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}
+					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+					return nk
+				}(),
+			},
+			initialCRDObjects:   []runtime.Object{readyCRD()},
+			fakeKubeClientSetup: allowRules,
+			podNetworkKindName:  "younger-candidate",
+			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
+				nk := podNetworkKindObj()
+				nk.Name = "younger-candidate"
+				nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}
+				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+				nk.Status.DefaultPodNetworkKind = ptr.To(false)
+				nk.Status.Conditions = []metav1.Condition{
+					{
+						Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+						Status:  metav1.ConditionTrue,
+						Reason:  v1alpha1.PodNetworkKindReasonCompliant,
+						Message: "",
+					},
+					{
+						Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+						Status:  metav1.ConditionFalse,
+						Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindAlreadySet,
+						Message: "Another PodNetworkKind is already set as default",
+					},
+				}
+				return nk
+			}(),
+		},
+		{
+			name: "default PodNetworkKind tie-breaker by name when timestamps equal",
+			initialPodNetworkKindObjects: []runtime.Object{
+				func() *v1alpha1.PodNetworkKind {
+					nk := podNetworkKindObj()
+					nk.Name = "alpha-candidate"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+					return nk
+				}(),
+				func() *v1alpha1.PodNetworkKind {
+					nk := podNetworkKindObj()
+					nk.Name = "beta-candidate"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+					return nk
+				}(),
+			},
+			initialCRDObjects:   []runtime.Object{readyCRD()},
+			fakeKubeClientSetup: allowRules,
+			podNetworkKindName:  "alpha-candidate",
+			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
+				nk := podNetworkKindObj()
+				nk.Name = "alpha-candidate"
+				nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+				nk.Status.DefaultPodNetworkKind = ptr.To(true)
+				nk.Status.Conditions = []metav1.Condition{
+					{
+						Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+						Status:  metav1.ConditionTrue,
+						Reason:  v1alpha1.PodNetworkKindReasonCompliant,
+						Message: "",
+					},
+					{
+						Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+						Status:  metav1.ConditionTrue,
+						Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
+						Message: "",
+					},
+				}
 				return nk
 			}(),
 		},
@@ -801,6 +922,46 @@ func TestHasStatusChanged(t *testing.T) {
 				},
 			},
 			expected: true,
+		},
+		{
+			name: "different DefaultPodNetworkKind nil vs true",
+			oldPNK: &v1alpha1.PodNetworkKind{
+				Status: v1alpha1.PodNetworkKindStatus{},
+			},
+			newPNK: &v1alpha1.PodNetworkKind{
+				Status: v1alpha1.PodNetworkKindStatus{
+					DefaultPodNetworkKind: ptr.To(true),
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "different DefaultPodNetworkKind true vs false",
+			oldPNK: &v1alpha1.PodNetworkKind{
+				Status: v1alpha1.PodNetworkKindStatus{
+					DefaultPodNetworkKind: ptr.To(true),
+				},
+			},
+			newPNK: &v1alpha1.PodNetworkKind{
+				Status: v1alpha1.PodNetworkKindStatus{
+					DefaultPodNetworkKind: ptr.To(false),
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "identical DefaultPodNetworkKind",
+			oldPNK: &v1alpha1.PodNetworkKind{
+				Status: v1alpha1.PodNetworkKindStatus{
+					DefaultPodNetworkKind: ptr.To(true),
+				},
+			},
+			newPNK: &v1alpha1.PodNetworkKind{
+				Status: v1alpha1.PodNetworkKindStatus{
+					DefaultPodNetworkKind: ptr.To(true),
+				},
+			},
+			expected: false,
 		},
 	}
 

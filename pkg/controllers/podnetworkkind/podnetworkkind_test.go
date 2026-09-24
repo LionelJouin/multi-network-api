@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/ptr"
 )
 
 // fakeReconciler is a simple implementation of the reconciler interface for testing purposes.
@@ -268,6 +269,192 @@ func TestEventHandlers(t *testing.T) {
 			},
 			expectedPodNetworkKindNames: []string{"my-network-kind", "example-com-mynetwork"},
 		},
+		{
+			name: "create PodNetworkKind requesting default enqueues existing default candidate",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-a"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			initialExpectedPodNetworkKindNames: []string{"pnk-a"},
+			createObjects: []object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-b"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"pnk-a", "pnk-b", "pnk-a"},
+		},
+		{
+			name: "delete PodNetworkKind requesting default enqueues remaining default candidate",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-a"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-b"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			initialExpectedPodNetworkKindNames: []string{"pnk-a", "pnk-b"},
+			deleteObjects: []object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-a"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"pnk-a", "pnk-b", "pnk-b"},
+		},
+		{
+			name: "update PodNetworkKind requesting default enqueues all default candidates",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-a"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-b"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			initialExpectedPodNetworkKindNames: []string{"pnk-a", "pnk-b"},
+			updateObjects: []object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "pnk-b",
+						Labels: map[string]string{"foo": "bar"},
+					},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"pnk-a", "pnk-b", "pnk-a", "pnk-b"},
+		},
+		{
+			name: "create PodNetworkKind with default false does not enqueue other candidates",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-a"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(true),
+					},
+				},
+			},
+			initialExpectedPodNetworkKindNames: []string{"pnk-a"},
+			createObjects: []object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "pnk-non-default"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						DefaultPodNetworkKind: ptr.To(false),
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"pnk-a", "pnk-non-default"},
+		},
+		{
+			name: "update CustomResourceDefinition without GroupKind change enqueues name",
+			initialCRDObjects: []runtime.Object{
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "mynetworks.example.com"},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "example.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+					},
+				},
+			},
+			initialExpectedPodNetworkKindNames: []string{"example-com-mynetwork"},
+			updateObjects: []object{
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "mynetworks.example.com",
+						Labels: map[string]string{"updated": "true"},
+					},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "example.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"example-com-mynetwork", "example-com-mynetwork"},
+		},
+		{
+			name: "multiple CRDs created enqueues all corresponding names",
+			createObjects: []object{
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "netas.a.com"},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "a.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "NetA"},
+					},
+				},
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "netbs.b.com"},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "b.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "NetB"},
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"a-com-neta", "b-com-netb"},
+		},
+		{
+			name: "create both PodNetworkKind and CustomResourceDefinition with different names",
+			createObjects: []object{
+				&v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-pnk"}},
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "mynetworks.example.com"},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "example.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"my-pnk", "example-com-mynetwork"},
+		},
+		{
+			name: "delete CRD and PodNetworkKind together",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-pnk"}},
+			},
+			initialCRDObjects: []runtime.Object{
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "mynetworks.example.com"},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "example.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+					},
+				},
+			},
+			initialExpectedPodNetworkKindNames: []string{"my-pnk", "example-com-mynetwork"},
+			deleteObjects: []object{
+				&v1alpha1.PodNetworkKind{ObjectMeta: metav1.ObjectMeta{Name: "my-pnk"}},
+				&apiextensionsv1.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "mynetworks.example.com"},
+					Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+						Group: "example.com",
+						Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "MyNetwork"},
+					},
+				},
+			},
+			expectedPodNetworkKindNames: []string{"my-pnk", "example-com-mynetwork", "my-pnk", "example-com-mynetwork"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -457,6 +644,37 @@ func TestEnqueuePodNetworkKind(t *testing.T) {
 			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
 		}
 	})
+
+	t.Run("DeletedFinalStateUnknown with valid PodNetworkKind", func(t *testing.T) {
+		pnk := &v1alpha1.PodNetworkKind{
+			ObjectMeta: metav1.ObjectMeta{Name: "tombstone-network-kind"},
+		}
+		tombstone := cache.DeletedFinalStateUnknown{
+			Key: "tombstone-network-kind",
+			Obj: pnk,
+		}
+		controller.enqueuePodNetworkKind(tombstone)
+
+		if controller.podNetworkKindQueue.Len() != 1 {
+			t.Fatalf("expected queue length 1, got %d", controller.podNetworkKindQueue.Len())
+		}
+		key, _ := controller.podNetworkKindQueue.Get()
+		if key != "tombstone-network-kind" {
+			t.Errorf("expected key %q, got %q", "tombstone-network-kind", key)
+		}
+		controller.podNetworkKindQueue.Done(key)
+	})
+
+	t.Run("DeletedFinalStateUnknown with invalid Obj", func(t *testing.T) {
+		tombstone := cache.DeletedFinalStateUnknown{
+			Key: "bad-tombstone",
+			Obj: "not-a-pod-network-kind",
+		}
+		controller.enqueuePodNetworkKind(tombstone)
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
+		}
+	})
 }
 
 func TestOnCustomResourceDefinitionEvent(t *testing.T) {
@@ -547,6 +765,40 @@ func TestOnCustomResourceDefinitionEvent(t *testing.T) {
 		}
 
 		controller.onCustomResourceDefinitionEvent(nil, "invalid-new")
+		if controller.podNetworkKindQueue.Len() != 0 {
+			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
+		}
+	})
+
+	t.Run("DeletedFinalStateUnknown with valid CRD", func(t *testing.T) {
+		crd := &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "TombstoneNet"},
+			},
+		}
+		tombstone := cache.DeletedFinalStateUnknown{
+			Key: "example-com-tombstonenet",
+			Obj: crd,
+		}
+		controller.onCustomResourceDefinitionEvent(tombstone, nil)
+		if controller.podNetworkKindQueue.Len() != 1 {
+			t.Fatalf("expected queue length 1, got %d", controller.podNetworkKindQueue.Len())
+		}
+		key, _ := controller.podNetworkKindQueue.Get()
+		expected := v1alpha1.GetPodNetworkKindName("example.com", "TombstoneNet")
+		if key != expected {
+			t.Errorf("expected key %q, got %q", expected, key)
+		}
+		controller.podNetworkKindQueue.Done(key)
+	})
+
+	t.Run("DeletedFinalStateUnknown with invalid Obj", func(t *testing.T) {
+		tombstone := cache.DeletedFinalStateUnknown{
+			Key: "bad-crd-tombstone",
+			Obj: "not-a-crd",
+		}
+		controller.onCustomResourceDefinitionEvent(tombstone, nil)
 		if controller.podNetworkKindQueue.Len() != 0 {
 			t.Fatalf("expected queue length 0, got %d", controller.podNetworkKindQueue.Len())
 		}
@@ -693,6 +945,44 @@ func TestEnqueueAllPodNetworkKinds(t *testing.T) {
 	}
 
 	controller.enqueueAllPodNetworkKinds()
+
+	if controller.podNetworkKindQueue.Len() != 2 {
+		t.Fatalf("expected queue length 2, got %d", controller.podNetworkKindQueue.Len())
+	}
+}
+
+func TestEnqueueAllDefaultCandidates(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	initialPNK1 := &v1alpha1.PodNetworkKind{
+		ObjectMeta: metav1.ObjectMeta{Name: "pnk-default-1"},
+		Spec: v1alpha1.PodNetworkKindSpec{
+			DefaultPodNetworkKind: ptr.To(true),
+		},
+	}
+	initialPNK2 := &v1alpha1.PodNetworkKind{
+		ObjectMeta: metav1.ObjectMeta{Name: "pnk-non-default"},
+		Spec: v1alpha1.PodNetworkKindSpec{
+			DefaultPodNetworkKind: ptr.To(false),
+		},
+	}
+	initialPNK3 := &v1alpha1.PodNetworkKind{
+		ObjectMeta: metav1.ObjectMeta{Name: "pnk-default-2"},
+		Spec: v1alpha1.PodNetworkKindSpec{
+			DefaultPodNetworkKind: ptr.To(true),
+		},
+	}
+
+	_, _, _, controller, _ := newController(ctx, t, []runtime.Object{initialPNK1, initialPNK2, initialPNK3}, nil)
+
+	// Clear items from queue
+	for controller.podNetworkKindQueue.Len() > 0 {
+		item, _ := controller.podNetworkKindQueue.Get()
+		controller.podNetworkKindQueue.Done(item)
+	}
+
+	controller.enqueueAllDefaultCandidates()
 
 	if controller.podNetworkKindQueue.Len() != 2 {
 		t.Fatalf("expected queue length 2, got %d", controller.podNetworkKindQueue.Len())

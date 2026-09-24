@@ -27,9 +27,12 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	v1apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/ptr"
 	"k8s.io/utils/set"
 )
 
@@ -106,9 +109,11 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 		}
 	}
 
-	err = pnkr.setConditions(podNetworkKind, crd)
+	pnkr.setImplementationTypeReadyCondition(podNetworkKind, crd)
+
+	err = pnkr.setDefaultPodNetworkKind(podNetworkKind)
 	if err != nil {
-		return fmt.Errorf("failed to set conditions: %w", err)
+		return fmt.Errorf("failed to set default pod network kind: %w", err)
 	}
 
 	if hasStatusChanged(oldNetworkKind, podNetworkKind) {
@@ -121,50 +126,127 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 	return nil
 }
 
-func (pnkr *PodNetworkKindReconciler) setConditions(podNetworkKind *v1alpha1.PodNetworkKind, crd *apiextensionsv1.CustomResourceDefinition) error {
-	podNetworkKind.Status.Conditions = []metav1.Condition{
-		{
-			Type:               v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-			Status:             metav1.ConditionTrue,
-			Message:            "",
-			ObservedGeneration: podNetworkKind.ObjectMeta.Generation,
-			LastTransitionTime: metav1.Now(),
-			Reason:             v1alpha1.PodNetworkKindReasonCompliant,
-		},
+func (pnkr *PodNetworkKindReconciler) setImplementationTypeReadyCondition(podNetworkKind *v1alpha1.PodNetworkKind, crd *apiextensionsv1.CustomResourceDefinition) {
+	condition := metav1.Condition{
+		Type:               v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+		Status:             metav1.ConditionTrue,
+		Message:            "",
+		ObservedGeneration: podNetworkKind.ObjectMeta.Generation,
+		Reason:             v1alpha1.PodNetworkKindReasonCompliant,
 	}
 
 	if crd == nil {
-		podNetworkKind.Status.Conditions[0].Status = metav1.ConditionFalse
-		podNetworkKind.Status.Conditions[0].Message = "CRD not found"
-		podNetworkKind.Status.Conditions[0].Reason = v1alpha1.PodNetworkKindReasonCRDNotFound
-		return nil
+		condition.Status = metav1.ConditionFalse
+		condition.Message = "CRD not found"
+		condition.Reason = v1alpha1.PodNetworkKindReasonCRDNotFound
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
+		return
 	}
 
 	ready, message := crdReady(crd)
 	if !ready {
-		podNetworkKind.Status.Conditions[0].Status = metav1.ConditionFalse
-		podNetworkKind.Status.Conditions[0].Message = message
-		podNetworkKind.Status.Conditions[0].Reason = v1alpha1.PodNetworkKindReasonCRDNotReady
-		return nil
+		condition.Status = metav1.ConditionFalse
+		condition.Message = message
+		condition.Reason = v1alpha1.PodNetworkKindReasonCRDNotReady
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
+		return
 	}
 
 	categoriesExisting, message := crdCategory(crd)
 	if !categoriesExisting {
-		podNetworkKind.Status.Conditions[0].Status = metav1.ConditionFalse
-		podNetworkKind.Status.Conditions[0].Message = message
-		podNetworkKind.Status.Conditions[0].Reason = v1alpha1.PodNetworkKindReasonCRDMissingCategories
-		return nil
+		condition.Status = metav1.ConditionFalse
+		condition.Message = message
+		condition.Reason = v1alpha1.PodNetworkKindReasonCRDMissingCategories
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
+		return
 	}
 
 	allowed := pnkr.hasPermissions(crd)
 	if !allowed {
-		podNetworkKind.Status.Conditions[0].Status = metav1.ConditionFalse
-		podNetworkKind.Status.Conditions[0].Message = "Insufficient permissions to access the Custom Resources"
-		podNetworkKind.Status.Conditions[0].Reason = v1alpha1.PodNetworkKindReasonMissingRBAC
+		condition.Status = metav1.ConditionFalse
+		condition.Message = "Insufficient permissions to access the Custom Resources"
+		condition.Reason = v1alpha1.PodNetworkKindReasonMissingRBAC
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
+		return
+	}
+
+	meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
+}
+
+func (pnkr *PodNetworkKindReconciler) setDefaultPodNetworkKind(podNetworkKind *v1alpha1.PodNetworkKind) error {
+	if podNetworkKind.Spec.DefaultPodNetworkKind == nil || !*podNetworkKind.Spec.DefaultPodNetworkKind {
+		podNetworkKind.Status.DefaultPodNetworkKind = nil
+		meta.RemoveStatusCondition(&podNetworkKind.Status.Conditions, v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind)
 		return nil
 	}
 
+	allKinds, err := pnkr.podNetworkKindLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("failed to list PodNetworkKinds: %w", err)
+	}
+
+	var candidates []*v1alpha1.PodNetworkKind
+	foundCurrent := false
+	for _, k := range allKinds {
+		if k.Spec.DefaultPodNetworkKind != nil && *k.Spec.DefaultPodNetworkKind {
+			if k.Name == podNetworkKind.Name {
+				candidates = append(candidates, podNetworkKind)
+				foundCurrent = true
+			} else {
+				candidates = append(candidates, k)
+			}
+		}
+	}
+	if !foundCurrent {
+		candidates = append(candidates, podNetworkKind)
+	}
+
+	best := selectDefaultPodNetworkKind(candidates)
+	if best != nil && best.Name == podNetworkKind.Name {
+		podNetworkKind.Status.DefaultPodNetworkKind = ptr.To(true)
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+			Status:             metav1.ConditionTrue,
+			Reason:             v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
+			Message:            "",
+			ObservedGeneration: podNetworkKind.Generation,
+		})
+	} else {
+		podNetworkKind.Status.DefaultPodNetworkKind = ptr.To(false)
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+			Status:             metav1.ConditionFalse,
+			Reason:             v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindAlreadySet,
+			Message:            "Another PodNetworkKind is already set as default",
+			ObservedGeneration: podNetworkKind.Generation,
+		})
+	}
+
 	return nil
+}
+
+func selectDefaultPodNetworkKind(candidates []*v1alpha1.PodNetworkKind) *v1alpha1.PodNetworkKind {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if isOlderOrFirstAlphabetically(c, best) {
+			best = c
+		}
+	}
+	return best
+}
+
+func isOlderOrFirstAlphabetically(a, b *v1alpha1.PodNetworkKind) bool {
+	if a.CreationTimestamp.Before(&b.CreationTimestamp) {
+		return true
+	}
+	if b.CreationTimestamp.Before(&a.CreationTimestamp) {
+		return false
+	}
+	return a.Name < b.Name
 }
 
 // crdCategory checks if the CRD has all the mandatory categories.
@@ -221,13 +303,22 @@ func crdReady(crd *apiextensionsv1.CustomResourceDefinition) (bool, string) {
 }
 
 func hasStatusChanged(oldPodNetworkKind *v1alpha1.PodNetworkKind, newPodNetworkKind *v1alpha1.PodNetworkKind) bool {
+	if (oldPodNetworkKind.Status.DefaultPodNetworkKind == nil) != (newPodNetworkKind.Status.DefaultPodNetworkKind == nil) {
+		return true
+	}
+	if oldPodNetworkKind.Status.DefaultPodNetworkKind != nil && newPodNetworkKind.Status.DefaultPodNetworkKind != nil {
+		if *oldPodNetworkKind.Status.DefaultPodNetworkKind != *newPodNetworkKind.Status.DefaultPodNetworkKind {
+			return true
+		}
+	}
+
 	if len(oldPodNetworkKind.Status.Conditions) != len(newPodNetworkKind.Status.Conditions) {
 		return true
 	}
 
-	for i, oldCondition := range oldPodNetworkKind.Status.Conditions {
-		newCondition := newPodNetworkKind.Status.Conditions[i]
-		if oldCondition.Type != newCondition.Type ||
+	for _, oldCondition := range oldPodNetworkKind.Status.Conditions {
+		newCondition := findCondition(newPodNetworkKind.Status.Conditions, oldCondition.Type)
+		if newCondition == nil ||
 			oldCondition.Status != newCondition.Status ||
 			oldCondition.Reason != newCondition.Reason ||
 			oldCondition.Message != newCondition.Message {
@@ -235,6 +326,15 @@ func hasStatusChanged(oldPodNetworkKind *v1alpha1.PodNetworkKind, newPodNetworkK
 		}
 	}
 	return false
+}
+
+func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
 }
 
 func (pnkr *PodNetworkKindReconciler) hasPermissions(crd *apiextensionsv1.CustomResourceDefinition) bool {
