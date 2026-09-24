@@ -33,7 +33,7 @@ import (
 
 const (
 	// DefaultResyncPeriod is the default period between rules refreshes.
-	DefaultResyncPeriod = 30 * time.Second
+	DefaultResyncPeriod = 10 * time.Second
 	// AllNamespaces is the wildcard namespace to evaluate rules across all namespaces.
 	AllNamespaces = "*"
 )

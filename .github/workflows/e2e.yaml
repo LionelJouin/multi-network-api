@@ -1,0 +1,41 @@
+name: E2E
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create kind cluster
+        run: kind create cluster
+
+      - name: Build controller image
+        run: make build-image VERSION=latest
+
+      - name: Load image into kind
+        run: |
+          docker tag multi-network-controller:latest localhost:5000/multi-network-api/multi-network-controller:latest
+          kind load docker-image localhost:5000/multi-network-api/multi-network-controller:latest
+
+      - name: Deploy controller and CRD
+        run: |
+          kubectl apply -f deployment/
+          kubectl rollout status deployment/multi-network-controller --timeout=60s
+
+      - name: Run E2E tests
+        run: make test-e2e
