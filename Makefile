@@ -24,11 +24,15 @@ verify:
 .PHONY: test
 test:
 	@mkdir -p _output
-	go test $$(go list ./... | grep -v /test/e2e) -race -count=1 -coverprofile=_output/coverage.out
+	go test $$(go list ./... | grep -v /test/) -race -count=1 -coverprofile=_output/coverage.out
 
 .PHONY: test-e2e
 test-e2e:
 	go test ./test/e2e/... -v -count=1 -ginkgo.v $(E2E_ARGS)
+
+.PHONY: test-conformance
+test-conformance:
+	go test ./test/conformance/... -v -count=1 -ginkgo.v $(CONFORMANCE_ARGS)
 
 .PHONY: .build-image
 build-image:

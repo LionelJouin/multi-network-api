@@ -146,3 +146,14 @@ type PodNetworkKindList struct {
 
 	Items []PodNetworkKind `json:"items"`
 }
+
+// PodNetwork represents a reference to a specific network instance for a pod.
+type PodNetwork struct {
+	// Kind is the kind of the network instance.
+	Kind string `json:"kind,omitempty"`
+	// Name is the name of the network instance.
+	Name string `json:"name,omitempty"`
+	// Namespace is the namespace of the network instance.
+	// It is optional and may be nil if the network instance is cluster-scoped.
+	Namespace *string `json:"namespace,omitempty"`
+}

@@ -128,11 +128,10 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 
 func (pnkr *PodNetworkKindReconciler) setImplementationTypeReadyCondition(podNetworkKind *v1alpha1.PodNetworkKind, crd *apiextensionsv1.CustomResourceDefinition) {
 	condition := metav1.Condition{
-		Type:               v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-		Status:             metav1.ConditionTrue,
-		Message:            "",
-		ObservedGeneration: podNetworkKind.ObjectMeta.Generation,
-		Reason:             v1alpha1.PodNetworkKindReasonCompliant,
+		Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+		Status:  metav1.ConditionTrue,
+		Message: "",
+		Reason:  v1alpha1.PodNetworkKindReasonCompliant,
 	}
 
 	if crd == nil {
@@ -205,20 +204,18 @@ func (pnkr *PodNetworkKindReconciler) setDefaultPodNetworkKind(podNetworkKind *v
 	if best != nil && best.Name == podNetworkKind.Name {
 		podNetworkKind.Status.DefaultPodNetworkKind = ptr.To(true)
 		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-			Status:             metav1.ConditionTrue,
-			Reason:             v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
-			Message:            "",
-			ObservedGeneration: podNetworkKind.Generation,
+			Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+			Status:  metav1.ConditionTrue,
+			Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
+			Message: "",
 		})
 	} else {
 		podNetworkKind.Status.DefaultPodNetworkKind = ptr.To(false)
 		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-			Status:             metav1.ConditionFalse,
-			Reason:             v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindAlreadySet,
-			Message:            "Another PodNetworkKind is already set as default",
-			ObservedGeneration: podNetworkKind.Generation,
+			Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
+			Status:  metav1.ConditionFalse,
+			Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindAlreadySet,
+			Message: "Another PodNetworkKind is already set as default",
 		})
 	}
 
