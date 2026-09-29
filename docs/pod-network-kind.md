@@ -2,7 +2,7 @@
 
 ## Proposal
 
-`PodNetworkKind` defines a mapping between a Kubernetes-recognized pod network kind and an implementation-specific pod network object type. It does not define networking behavior or semantics. Instead, it provides a classification and discovery mechanism that allows Kubernetes APIs and controllers to recognize and integrate multiple pod networks.
+`PodNetworkKind` defines a Kubernetes-recognized pod network kind based on an implementation-specific pod network object type. It does not define networking behavior or semantics. Instead, it provides a classification and discovery mechanism that allows Kubernetes APIs and controllers to recognize and integrate multiple pod networks.
 
 `PodNetworkKind` is a cluster-scoped resource. It is expected to be installed by the cluster administrator together with a pod network implementation.
 
@@ -162,7 +162,7 @@ const (
   // StandardDeviceAttributePodNetworkNamespace is a standard device attribute name
   // which describes the namespace of a pod network.
   // The value is a string value referring to the namespace of a pod network object.
-  // The attribute is optional for the PodNetworkKind pointing to a non-namespaced GK.
+  // The attribute should not be set for the PodNetworkKind pointing to a non-namespaced GK.
   // The attribute is mandatory for the PodNetworkKind pointing to a namespaced GK.
   StandardDeviceAttributePodNetworkNamespace resourceapi.QualifiedName = StandardDeviceAttributePrefix + "/" + "podNetworkNamespace"
   // StandardDeviceAttributePodNetworkKind is a standard device attribute name
@@ -189,7 +189,7 @@ type PodNetwork struct {
   Name string `json:"name"`
 
   // Namespace identifies the namespace of the pod network object.
-  // Optional if the pod network object is a non-namespaced resource.
+  // Not set if the pod network object is a non-namespaced resource.
   // +optional
   Namespace *string `json:"namespace,omitempty"`
 }
@@ -495,11 +495,13 @@ spec:
 
 The `PodNetworkKind` API enforces lifecycle and referential integrity constraints to ensure proper discovery, default selection, and protection against orphaning pod network objects.
 
+A controller is provided alongside the API to reconcile and manage `PodNetworkKind` resources. Individual pod network implementations are not responsible for managing `PodNetworkKind` objects.
+
 Validation must enforce the following:
 
 * Immutability: The `spec` of a `PodNetworkKind` is immutable once created. Updates to the `spec` field must be rejected. This can be enforced via CRD-level validation rules (e.g., CEL `x-kubernetes-validations`).
 
-A controller must enforce the following:
+The controller must enforce the following:
 
 * Deletion Protection (Finalizer): A `PodNetworkKind` cannot be deleted while pod network objects belonging to it still exist. The controller attaches a finalizer (`multinetwork.networking.x-k8s.io/network-kind-protection`) to each `PodNetworkKind`. When a `PodNetworkKind` is marked for deletion (`metadata.deletionTimestamp` is set), the controller checks whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the controller retains the finalizer to block deletion. Once all pod network objects belonging to that `PodNetworkKind` are deleted, the controller removes the finalizer, allowing the deletion to complete.
 
@@ -594,7 +596,8 @@ type PodNetwork struct {
   Name *string
 
   // Namespace identifies the namespace of the pod network object.
-  // Optional if the pod network object is a non-namespace scoped object.
+  // Must be set for namespace-scoped pod network objects and un-set
+  // for non-namespace-scoped pod network objects.
   // +optional
   Namespace *string
 }
