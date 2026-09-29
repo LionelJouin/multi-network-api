@@ -40,9 +40,6 @@ import (
 
 var _ = Describe("Pod Network Attachment", func() {
 	It("should create a network from manifest, attach a pod to it via ResourceClaim, and verify status in ResourceClaim", func(ctx context.Context) {
-		Expect(networkManifest != "" || podNetwork != "").To(BeTrue(),
-			"either -network-manifest or -pod-network must be specified to provide the network instance")
-
 		// Resolve the implementation CRD and its scope
 		crdList, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().List(ctx, metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred(), "failed to list CRDs")
@@ -59,69 +56,61 @@ var _ = Describe("Pod Network Attachment", func() {
 
 		isNamespaced := crd.Spec.Scope == apiextensionsv1.NamespaceScoped
 
+		By(fmt.Sprintf("installing network instance from manifest %s", networkManifest))
+		yamlBytes, readErr := os.ReadFile(networkManifest)
+		Expect(readErr).NotTo(HaveOccurred(), "failed to read network manifest: %s", networkManifest)
+
 		var networkName string
 		var networkNamespace string
 
-		if networkManifest != "" {
-			By(fmt.Sprintf("installing network instance from manifest %s", networkManifest))
-			yamlBytes, readErr := os.ReadFile(networkManifest)
-			Expect(readErr).NotTo(HaveOccurred(), "failed to read network manifest: %s", networkManifest)
-
-			decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(yamlBytes), 4096)
-			for {
-				obj := &unstructured.Unstructured{}
-				decodeErr := decoder.Decode(obj)
-				if decodeErr == io.EOF {
-					break
-				}
-				if decodeErr != nil || len(obj.Object) == 0 {
-					continue
-				}
-
-				gvk := obj.GroupVersionKind()
-				targetGVR := schema.GroupVersionResource{
-					Group:    gvk.Group,
-					Version:  gvk.Version,
-					Resource: crd.Spec.Names.Plural,
-				}
-
-				ns := obj.GetNamespace()
-				if isNamespaced && ns == "" {
-					ns = testNamespace
-					obj.SetNamespace(ns)
-				}
-
-				var created *unstructured.Unstructured
-				if isNamespaced {
-					created, err = dynamicClient.Resource(targetGVR).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
-				} else {
-					created, err = dynamicClient.Resource(targetGVR).Create(ctx, obj, metav1.CreateOptions{})
-				}
-				Expect(err).NotTo(HaveOccurred(), "failed to create object %s/%s from manifest", obj.GetKind(), obj.GetName())
-
-				createdName := created.GetName()
-				createdNamespace := created.GetNamespace()
-				DeferCleanup(func(ctx context.Context) {
-					if isNamespaced {
-						_ = dynamicClient.Resource(targetGVR).Namespace(createdNamespace).Delete(ctx, createdName, metav1.DeleteOptions{})
-					} else {
-						_ = dynamicClient.Resource(targetGVR).Delete(ctx, createdName, metav1.DeleteOptions{})
-					}
-				})
-
-				if gvk.Group == implementationGroup && gvk.Kind == implementationKind {
-					networkName = createdName
-					networkNamespace = createdNamespace
-				}
+		decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(yamlBytes), 4096)
+		for {
+			obj := &unstructured.Unstructured{}
+			decodeErr := decoder.Decode(obj)
+			if decodeErr == io.EOF {
+				break
 			}
-			Expect(networkName).NotTo(BeEmpty(), "no network object matching group %s and kind %s found in manifest", implementationGroup, implementationKind)
-		} else {
-			networkName = podNetwork
-			networkNamespace = podNetworkNamespace
-			if isNamespaced && networkNamespace == "" {
-				networkNamespace = testNamespace
+			if decodeErr != nil || len(obj.Object) == 0 {
+				continue
+			}
+
+			gvk := obj.GroupVersionKind()
+			targetGVR := schema.GroupVersionResource{
+				Group:    gvk.Group,
+				Version:  gvk.Version,
+				Resource: crd.Spec.Names.Plural,
+			}
+
+			ns := obj.GetNamespace()
+			if isNamespaced && ns == "" {
+				ns = testNamespace
+				obj.SetNamespace(ns)
+			}
+
+			var created *unstructured.Unstructured
+			if isNamespaced {
+				created, err = dynamicClient.Resource(targetGVR).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
+			} else {
+				created, err = dynamicClient.Resource(targetGVR).Create(ctx, obj, metav1.CreateOptions{})
+			}
+			Expect(err).NotTo(HaveOccurred(), "failed to create object %s/%s from manifest", obj.GetKind(), obj.GetName())
+
+			createdName := created.GetName()
+			createdNamespace := created.GetNamespace()
+			DeferCleanup(func(ctx context.Context) {
+				if isNamespaced {
+					_ = dynamicClient.Resource(targetGVR).Namespace(createdNamespace).Delete(ctx, createdName, metav1.DeleteOptions{})
+				} else {
+					_ = dynamicClient.Resource(targetGVR).Delete(ctx, createdName, metav1.DeleteOptions{})
+				}
+			})
+
+			if gvk.Group == implementationGroup && gvk.Kind == implementationKind {
+				networkName = createdName
+				networkNamespace = createdNamespace
 			}
 		}
+		Expect(networkName).NotTo(BeEmpty(), "no network object matching group %s and kind %s found in manifest", implementationGroup, implementationKind)
 
 		podNetworkKindName := v1alpha1.GetPodNetworkKindName(implementationGroup, implementationKind)
 		deviceClassName := "conformance-" + podNetworkKindName

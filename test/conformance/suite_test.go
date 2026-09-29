@@ -39,8 +39,6 @@ const (
 var (
 	implementationGroup string
 	implementationKind  string
-	podNetwork          string
-	podNetworkNamespace string
 	networkManifest     string
 	testNamespace       string
 
@@ -53,8 +51,6 @@ var (
 func init() {
 	flag.StringVar(&implementationGroup, "implementation-group", "", "API group of the implementation CRD (e.g. devicenetwork.io)")
 	flag.StringVar(&implementationKind, "implementation-kind", "", "Kind of the implementation CRD (e.g. DeviceNetwork)")
-	flag.StringVar(&podNetwork, "pod-network", "", "Name of the pre-installed pod network object")
-	flag.StringVar(&podNetworkNamespace, "pod-network-namespace", "", "Namespace of the pod network object (optional for cluster-scoped)")
 	flag.StringVar(&networkManifest, "network-manifest", "", "Path to YAML file defining the network instance to install")
 	flag.StringVar(&testNamespace, "namespace", "default", "Namespace for test resources")
 }
@@ -67,6 +63,7 @@ func TestConformance(t *testing.T) {
 var _ = BeforeSuite(func() {
 	Expect(implementationGroup).NotTo(BeEmpty(), "-implementation-group flag is required")
 	Expect(implementationKind).NotTo(BeEmpty(), "-implementation-kind flag is required")
+	Expect(networkManifest).NotTo(BeEmpty(), "-network-manifest flag is required")
 
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	configOverrides := &clientcmd.ConfigOverrides{}
