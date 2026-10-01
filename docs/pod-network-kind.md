@@ -8,7 +8,7 @@
 
 A `PodNetworkKind` references a specific Group/Kind (GK) and multiple `PodNetworkKind` objects cannot reference the same GK. Any object matching this GK is considered a pod network instance belonging to that `PodNetworkKind`. As a result, a pod network instance belongs to exactly one `PodNetworkKind`. Users create implementation-defined pod network objects, while Kubernetes uses PodNetworkKind to recognize them as pod networks. A pod network is identified by its name, namespace (if applicable), and its associated `PodNetworkKind`.
 
-A `PodNetworkKind` is immutable once created, so the Group/Kind referenced by a `PodNetworkKind` cannot be changed. A `PodNetworkKind` cannot be deleted while at least one pod network object belonging to that `PodNetworkKind` exists. A `PodNetworkKind` reports an `ImplementationTypeReady` status condition indicating whether the CRD referenced by its `ImplementationType` exists and is ready in the cluster.
+A `PodNetworkKind` is immutable once created, so the Group/Kind referenced by a `PodNetworkKind` cannot be changed. A `PodNetworkKind` cannot be deleted while at least one pod network object belonging to that `PodNetworkKind` exists. A `PodNetworkKind` reports an `ImplementationTypeReady` status condition indicating whether the resource type referenced by its `ImplementationType` exists and is ready in the cluster.
 
 The presence of at least one `PodNetworkKind` object indicates that pod network (multi-network) functionality is available in the cluster.
 
@@ -40,16 +40,16 @@ type PodNetworkKindSpec struct {
   // ImplementationType identifies the API type of the pod network objects
   // belonging to this PodNetworkKind.
   // The ImplementationType may reference either a namespace-scoped or a cluster-scoped resource type.
-  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.ImplementationType is immutable"
+  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.implementationType is immutable"
   ImplementationType metav1.GroupKind
 
-  // DefaultPodNetworkKind indicates whether this PodNetworkKind requests to be the default for the cluster.
+  // DefaultKind indicates whether this PodNetworkKind requests to be the default for the cluster.
   // If true, this PodNetworkKind is requesting to be the default for the cluster.
   // If false, this PodNetworkKind is not requesting to be the default for the cluster.
   // If not specified, the default is false.
-  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.DefaultPodNetworkKind is immutable"
+  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.defaultKind is immutable"
   // +optional
-  DefaultPodNetworkKind *bool
+  DefaultKind *bool
 }
 
 // PodNetworkKindStatus describes the observed state of the PodNetworkKind.
@@ -60,75 +60,59 @@ type PodNetworkKindStatus struct {
   // +listMapKey=type
   Conditions []metav1.Condition
 
-  // DefaultPodNetworkKind indicates whether this PodNetworkKind has been selected to be the default for the cluster.
-  // When multiple PodNetworkKinds have spec.DefaultPodNetworkKind set to true, the candidate selected as default 
+  // DefaultKind indicates whether this PodNetworkKind has been selected to be the default for the cluster.
+  // When multiple PodNetworkKinds have spec.defaultKind set to true, the candidate selected as default 
   // is the oldest PodNetworkKind determined by metadata.creationTimestamp. If timestamps are equal, the 
   // candidate selected as default is the one with the first name in the list sorted in alphabetical order.
   // If another PodNetworkKind is already the active default PodNetworkKind, this field will be false even if 
-  // spec.DefaultPodNetworkKind is true, and a condition will be set to indicate that the default PodNetworkKind 
+  // spec.defaultKind is true, and a condition will be set to indicate that the default PodNetworkKind 
   // is already set.
   // +optional
-  DefaultPodNetworkKind *bool
+  DefaultKind *bool
 }
 
 // Well-known condition types for PodNetworkKinds.
 const (
-  // PodNetworkKindConditionImplementationTypeReady indicates whether the CRD referenced by the
+  // PodNetworkKindConditionImplementationTypeReady indicates whether the resource type referenced by the
   // PodNetworkKind's ImplementationType exists and is ready in the cluster.
   PodNetworkKindConditionImplementationTypeReady = "ImplementationTypeReady"
 
-  // PodNetworkKindConditionDefaultPodNetworkKind indicates whether this PodNetworkKind has been selected 
+  // PodNetworkKindConditionDefaultKind indicates whether this PodNetworkKind has been selected 
   // to be the default for the cluster.
-  // This condition is added only when the spec.DefaultPodNetworkKind is true.
-  PodNetworkKindConditionDefaultPodNetworkKind = "DefaultPodNetworkKind"
+  // This condition is added only when the spec.defaultKind is true.
+  PodNetworkKindConditionDefaultKind = "DefaultKind"
 )
 
 // Well-known condition reasons for PodNetworkKinds.
 const (
-  // PodNetworkKindReasonCRDNotFound in the ImplementationTypeReady condition indicates
-  // that the CRD referenced by the PodNetworkKind's ImplementationType does not exist
+  // PodNetworkKindReasonResourceTypeNotFound in the ImplementationTypeReady condition indicates
+  // that the resource type referenced by the PodNetworkKind's ImplementationType does not exist
   // in the cluster.
-  PodNetworkKindReasonCRDNotFound string = "CRDNotFound"
-  // PodNetworkKindReasonCRDNotReady in the ImplementationTypeReady condition indicates
-  // that the CRD referenced by the PodNetworkKind's ImplementationType exists but is not
-  // yet ready.
-  // Ready means that the CRD conditions status are reported in the following way for each types:
-  // - Established: True
-  // - NamesAccepted: True
-  // - NonStructuralSchema: False (or non-existent)
-  // - Terminating: False (or non-existent)
-  // - KubernetesAPIApprovalPolicyConformant: True (or non-existent)
-  // For more details, refer to the Kubernetes API documentation for CRD condition types:
-  // https://github.com/kubernetes/apiextensions-apiserver/blob/v0.37.0/pkg/apis/apiextensions/v1/types.go#L305
-  PodNetworkKindReasonCRDNotReady string = "CRDNotReady"
-  // PodNetworkKindReasonCRDMissingCategories in the ImplementationTypeReady condition indicates
-  // that the CRD referenced by the PodNetworkKind's ImplementationType exists but is missing
-  // required categories.
-  PodNetworkKindReasonCRDMissingCategories string = "CRDMissingCategories"
+  PodNetworkKindReasonResourceTypeNotFound string = "ResourceTypeNotFound"
   // PodNetworkKindReasonMissingRBAC in the ImplementationTypeReady condition indicates
-  // that the necessary RBAC permissions are missing for the CRD referenced by the
+  // that the necessary RBAC permissions are missing for the resource type referenced by the
   // PodNetworkKind's ImplementationType.
   PodNetworkKindReasonMissingRBAC string = "MissingRBAC"
   // PodNetworkKindReasonTypeConflict in the ImplementationTypeReady condition indicates
   // that another PodNetworkKind with the same type already exists in the cluster.
   PodNetworkKindReasonTypeConflict string = "TypeConflict"
   // PodNetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
-  // that the CRD referenced by the PodNetworkKind's ImplementationType exists and is ready.
+  // that the resource type referenced by the PodNetworkKind's ImplementationType exists and is ready.
   PodNetworkKindReasonCompliant string = "Compliant"
 
-  // PodNetworkKindReasonDefaultPodNetworkKindSet in the DefaultPodNetworkKind condition indicates
+  // PodNetworkKindReasonDefaultKindSet in the DefaultKind condition indicates
   // that this PodNetworkKind has been selected to be the default for the cluster.
-  PodNetworkKindReasonDefaultPodNetworkKindSet string = "DefaultPodNetworkKindSet"
-  // PodNetworkKindReasonDefaultPodNetworkKindAlreadySet in the DefaultPodNetworkKind condition indicates 
+  PodNetworkKindReasonDefaultKindSet string = "DefaultKindSet"
+  // PodNetworkKindReasonDefaultKindAlreadySet in the DefaultKind condition indicates 
   // that this PodNetworkKind cannot be set as the default for the cluster because another 
   // PodNetworkKind is already set as the default.
-  PodNetworkKindReasonDefaultPodNetworkKindAlreadySet string = "DefaultPodNetworkKindAlreadySet"
+  PodNetworkKindReasonDefaultKindAlreadySet string = "DefaultKindAlreadySet"
 )
 
-// Well-known finalizers for PodNetworkKinds.
+// Finalizers for PodNetworkKinds.
 const (
   // PodNetworkKindFinalizer is attached to a PodNetworkKind to prevent deletion
-  // while pod network objects referencing it still exist in the cluster.
+  // while pod network objects belonging to it still exist in the cluster.
   PodNetworkKindFinalizer = "multinetwork.networking.x-k8s.io/pod-network-kind-protection"
 )
 ```
@@ -234,11 +218,11 @@ status:
 
 This self-contained reporting model ensures that controllers (e.g. EndpointSlice, network policy...) can unambiguously determine the network identity directly from the `ResourceClaim` status, without being affected by subsequent modifications to or deletions of `ResourceSlice` objects.
 
-### CustomResourceDefinition Category
+### Resource Category
 
-Without a common `PodNetwork` API, there is no single resource type that represents all pod networks across implementations. Each implementation defines its own CustomResourceDefinition, so discovering all pod networks in a cluster requires knowing every implementation-specific type.
+Without a common `PodNetwork` API, there is no single resource type that represents all pod networks across implementations. Each implementation defines its own type (e.g. CustomResourceDefinition), so discovering all pod networks in a cluster requires knowing every implementation-specific type.
 
-To address this, pod network implementations must register their CRD under the `podnetwork` and `podnetworks` categories. CRD categories allow `kubectl` to aggregate resources of different types under a single alias, enabling users to list all pod networks across all implementations with a single command: `kubectl get podnetworks`.
+To address this, pod network implementations must register their resource type under the `podnetwork` and `podnetworks` categories. Resource type categories allow `kubectl` to aggregate resources of different types under a single alias, enabling users to list all pod networks across all implementations with a single command: `kubectl get podnetworks`.
 
 Below is an example CRD including the required `categories`:
 ```yaml
@@ -274,7 +258,7 @@ default     userdefinednetworks.k8s.ovn.org/red-network    45s
 
 ### Default PodNetworkKind
 
-A cluster administrator can designate a `PodNetworkKind` as the cluster-wide default by setting `spec.defaultPodNetworkKind: true`.
+A cluster administrator can designate a `PodNetworkKind` as the cluster-wide default by setting `spec.defaultKind: true`.
 
 In many clusters, only a single pod network implementation is installed, or one particular network type serves as the primary standard. Requiring users, manifests, and ecosystem APIs to always explicitly qualify network references with a `PodNetworkKind` introduces unnecessary verbosity and couples configurations to specific implementation types.
 
@@ -429,18 +413,18 @@ spec:
   implementationType:
     group: k8s.ovn.org
     kind: UserDefinedNetwork
-  defaultPodNetworkKind: true
+  defaultKind: true
 status:
-  defaultPodNetworkKind: true
+  defaultKind: true
   conditions:
-  - type: DefaultPodNetworkKind
+  - type: DefaultKind
     status: "True"
     lastTransitionTime: "2026-09-16T14:19:25Z"
-    reason: DefaultPodNetworkKindSet
+    reason: DefaultKindSet
     message: "This PodNetworkKind is set as the default for the cluster."
 ```
 
-A second `PodNetworkKind` requesting default status while an active default is already present:
+A second `PodNetworkKind` requesting default status while an active default is already present (note the use of `spec.defaultKind`):
 
 ```yaml
 apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
@@ -451,14 +435,14 @@ spec:
   implementationType:
     group: example.com
     kind: SecondaryNetwork
-  defaultPodNetworkKind: true
+  defaultKind: true
 status:
-  defaultPodNetworkKind: false
+  defaultKind: false
   conditions:
-  - type: DefaultPodNetworkKind
+  - type: DefaultKind
     status: "False"
     lastTransitionTime: "2026-09-16T14:20:00Z"
-    reason: DefaultPodNetworkKindAlreadySet
+    reason: DefaultKindAlreadySet
     message: "Another PodNetworkKind is already set as the default for the cluster."
 ```
 
@@ -499,31 +483,25 @@ A controller is provided alongside the API to reconcile and manage `PodNetworkKi
 
 Validation must enforce the following:
 
-* Immutability: The `spec` of a `PodNetworkKind` is immutable once created. Updates to the `spec` field must be rejected. This can be enforced via CRD-level validation rules (e.g., CEL `x-kubernetes-validations`).
+* Immutability: The `spec` of a `PodNetworkKind` is immutable once created. Updates to the `spec` field must be rejected. This can be enforced via resource type level validation rules (e.g., CEL `x-kubernetes-validations`).
 
 The controller must enforce the following:
 
 * Deletion Protection (Finalizer): A `PodNetworkKind` cannot be deleted while pod network objects belonging to it still exist. The controller attaches a finalizer (`multinetwork.networking.x-k8s.io/network-kind-protection`) to each `PodNetworkKind`. When a `PodNetworkKind` is marked for deletion (`metadata.deletionTimestamp` is set), the controller checks whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the controller retains the finalizer to block deletion. Once all pod network objects belonging to that `PodNetworkKind` are deleted, the controller removes the finalizer, allowing the deletion to complete.
 
-* ImplementationTypeReady Condition: A controller must watch `PodNetworkKind` objects and the CRDs in the cluster. For each `PodNetworkKind`, the controller must look up the CRD matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly:
+* ImplementationTypeReady Condition: The controller must watch `PodNetworkKind` objects and the resource types in the cluster. For each `PodNetworkKind`, the controller must look up the resource type matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly:
   * The condition is set to `True` with the reason `Compliant` if the other reasons for setting it to `False` do not apply.
-  * The condition is set to `False` with the reason `CRDNotFound` if the CRD does not exist.
-  * The condition is set to `False` with the reason `CRDNotReady` if the CRD exists but is not yet ready (conditions `Established` (True), `NamesAccepted` (True), `NonStructuralSchema` (False or non-existent), `Terminating` (False or non-existent), `KubernetesAPIApprovalPolicyConformant` (True or non-existent)).
-  * The condition is set to `False` with the reason `CRDMissingCategories` if the CRD exists and is ready but is missing the `podnetwork` or `podnetworks` categories.
+  * The condition is set to `False` with the reason `ResourceTypeNotFound` if the resource type does not exist.
   * The condition is set to `False` with the reason `MissingRBAC` if the necessary RBAC permissions are missing.
   * The condition is set to `False` with the reason `TypeConflict` if another `PodNetworkKind` already references the same Group/Kind.
 
-* DefaultPodNetworkKind Condition and Status: A controller must manage default `PodNetworkKind` selection. When one or more `PodNetworkKind` objects have `spec.defaultPodNetworkKind: true`, the controller determines the active default by selecting the candidate with the oldest `metadata.creationTimestamp`. If timestamps are equal, the candidate selected as default is the one with the first name in the list sorted in alphabetical order. For the selected candidate, it sets `status.defaultPodNetworkKind: true` and condition `DefaultPodNetworkKind` to `True` with reason `DefaultPodNetworkKindSet`. For any other candidate requesting default status, it sets `status.defaultPodNetworkKind: false` and condition `DefaultPodNetworkKind` to `False` with reason `DefaultPodNetworkKindAlreadySet`. If the active default is deleted, the controller reconciles remaining candidates with `spec.defaultPodNetworkKind: true` and promotes the oldest candidate via `metadata.creationTimestamp` (with alphabetical tie-breaking) to become the new active default. For PodNetworkKinds where `spec.defaultPodNetworkKind` is false or omitted, the `DefaultPodNetworkKind` condition is not added.
+* DefaultKind Condition and Status: The controller must manage default `PodNetworkKind` selection. When one or more `PodNetworkKind` objects have `spec.defaultKind: true`, the controller determines the active default by selecting the candidate with the oldest `metadata.creationTimestamp`. If timestamps are equal, the candidate selected as default is the one with the first name in the list sorted in alphabetical order. For the selected candidate, it sets `status.defaultKind: true` and condition `DefaultKind` to `True` with reason `DefaultKindSet`. For any other candidate requesting default status, it sets `status.defaultKind: false` and condition `DefaultKind` to `False` with reason `DefaultKindAlreadySet`. If the active default is deleted, the controller reconciles remaining candidates with `spec.defaultKind: true` and promotes the oldest candidate via `metadata.creationTimestamp` (with alphabetical tie-breaking) to become the new active default. For PodNetworkKinds where `spec.defaultKind` is false or omitted, the `DefaultKind` condition is not added.
 
 #### E2E Tests
 
 E2E tests validate that the `PodNetworkKind` lifecycle and validation constraints are correctly enforced in a running cluster.
 
 E2E tests validate:
-* Group/Kind Uniqueness:
-  1. Creating a `PodNetworkKind` referencing a Group/Kind succeeds when no other `PodNetworkKind` references the same Group/Kind.
-  2. Creating a second `PodNetworkKind` referencing the same Group/Kind as an existing `PodNetworkKind` results in `ImplementationTypeReady` condition set to `False` with reason `TypeConflict`.
-  3. After deleting the first `PodNetworkKind`, the second `PodNetworkKind` has its `ImplementationTypeReady` condition updated to `True` (assuming CRD is ready).
 * Deletion Protection:
   1. Creating a `PodNetworkKind` results in the controller attaching the `multinetwork.networking.x-k8s.io/network-kind-protection` finalizer.
   2. Deleting a `PodNetworkKind` succeeds (finalizer is removed) when no pod network objects of the referenced Group/Kind exist.
@@ -531,33 +509,32 @@ E2E tests validate:
   4. After deleting all pod network objects of the referenced Group/Kind, the controller removes the finalizer and deleting the `PodNetworkKind` completes.
 * Immutability:
   1. Updating the `spec.implementationType` of an existing `PodNetworkKind` (e.g., changing the Group/Kind) is rejected.
-  2. Updating the `spec.defaultPodNetworkKind` of an existing `PodNetworkKind` is rejected.
+  2. Updating the `spec.defaultKind` of an existing `PodNetworkKind` is rejected.
   3. Updating the `metadata` (e.g., labels, annotations) of an existing `PodNetworkKind` succeeds.
 * ImplementationTypeReady Condition:
-  1. Creating a `PodNetworkKind` referencing an existing and ready CRD results in the `ImplementationTypeReady` condition being set to `True` with reason `Compliant`.
-  2. Creating a `PodNetworkKind` referencing a non-existent CRD results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotFound`.
-  3. Deleting the CRD referenced by a `PodNetworkKind` results in the `ImplementationTypeReady` condition being updated to `False` with reason `CRDNotFound`.
-  4. Creating the CRD referenced by a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
-  5. Creating a `PodNetworkKind` referencing a CRD that exists but is not yet ready results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDNotReady`.
-  6. Creating a `PodNetworkKind` referencing a ready CRD that is missing required categories (`podnetwork` / `podnetworks`) results in the `ImplementationTypeReady` condition being set to `False` with reason `CRDMissingCategories`.
-  7. Updating the CRD to include the required categories updates the `ImplementationTypeReady` condition to `True` with reason `Compliant`.
-  8. Creating a `PodNetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
-  9. Granting sufficient RBAC permissions to a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True` once the CRD is ready.
-* DefaultPodNetworkKind Condition:
-  1. Creating a `PodNetworkKind` with `spec.defaultPodNetworkKind: false` or omitted results in no `DefaultPodNetworkKind` condition being added and `status.defaultPodNetworkKind` not set to `true`.
-  2. Creating a `PodNetworkKind` with `spec.defaultPodNetworkKind: true` when no default exists results in `status.defaultPodNetworkKind: true` and `DefaultPodNetworkKind` condition set to `True` with reason `DefaultPodNetworkKindSet`.
-  3. Creating subsequent `PodNetworkKind` objects (e.g., PodNetworkKind B and PodNetworkKind C) with `spec.defaultPodNetworkKind: true` while an active default (PodNetworkKind A) exists results in both PodNetworkKind B and C having `status.defaultPodNetworkKind: false` and `DefaultPodNetworkKind` condition set to `False` with reason `DefaultPodNetworkKindAlreadySet`.
-  4. Creating two `PodNetworkKind` objects with `spec.defaultPodNetworkKind: true` and identical `metadata.creationTimestamp` results in the one with alphabetically earlier name being selected as default.
-  5. Deleting the active default `PodNetworkKind` (A) when multiple PodNetworkKinds remain (PodNetworkKind B created before PodNetworkKind C) results in PodNetworkKind B (the oldest remaining PodNetworkKind by `metadata.creationTimestamp`) being promoted to `status.defaultPodNetworkKind: true` and condition `DefaultPodNetworkKind` updated to `True` with reason `DefaultPodNetworkKindSet`, while PodNetworkKind C remains `status.defaultPodNetworkKind: false` with reason `DefaultPodNetworkKindAlreadySet`.
-  6. Deleting PodNetworkKind B results in PodNetworkKind C being promoted to `status.defaultPodNetworkKind: true` and condition `DefaultPodNetworkKind` updated to `True` with reason `DefaultPodNetworkKindSet`.
+  1. Creating a `PodNetworkKind` referencing an existing and ready resource type results in the `ImplementationTypeReady` condition being set to `True` with reason `Compliant`.
+  2. Creating a `PodNetworkKind` referencing a non-existent resource type results in the `ImplementationTypeReady` condition being set to `False` with reason `ResourceTypeNotFound`.
+  3. Deleting the resource type referenced by a `PodNetworkKind` results in the `ImplementationTypeReady` condition being updated to `False` with reason `ResourceTypeNotFound`.
+  4. Creating the resource type referenced by a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True`.
+  5. Creating a second `PodNetworkKind` referencing the same Group/Kind as an existing `PodNetworkKind` results in `ImplementationTypeReady` condition set to `False` with reason `TypeConflict`.
+  6. After deleting the first `PodNetworkKind`, the second `PodNetworkKind` has its `ImplementationTypeReady` condition updated to `True`.
+  7. Creating a `PodNetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
+  8. Granting sufficient RBAC permissions to a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True`.
+* DefaultKind Condition:
+  1. Creating a `PodNetworkKind` with `spec.defaultKind: false` or omitted results in no `DefaultKind` condition being added and `status.defaultKind` not set to `true`.
+  2. Creating a `PodNetworkKind` with `spec.defaultKind: true` when no default exists results in `status.defaultKind: true` and `DefaultKind` condition set to `True` with reason `DefaultKindSet`.
+  3. Creating subsequent `PodNetworkKind` objects (e.g., PodNetworkKind B and PodNetworkKind C) with `spec.defaultKind: true` while an active default (PodNetworkKind A) exists results in both PodNetworkKind B and C having `status.defaultKind: false` and `DefaultKind` condition set to `False` with reason `DefaultKindAlreadySet`.
+  4. Creating two `PodNetworkKind` objects with `spec.defaultKind: true` and identical `metadata.creationTimestamp` results in the one with alphabetically earlier name being selected as default (i.e., `status.defaultKind: true`).
+  5. Deleting the active default `PodNetworkKind` (A) when multiple PodNetworkKinds remain (PodNetworkKind B created before PodNetworkKind C) results in PodNetworkKind B (the oldest remaining PodNetworkKind by `metadata.creationTimestamp`) being promoted to `status.defaultKind: true` and condition `DefaultKind` updated to `True` with reason `DefaultKindSet`, while PodNetworkKind C remains `status.defaultKind: false` with reason `DefaultKindAlreadySet`.
+  6. Deleting PodNetworkKind B results in PodNetworkKind C being promoted to `status.defaultKind: true` and condition `DefaultKind` updated to `True` with reason `DefaultKindSet`.
 
 #### Conformance Tests
 
 Conformance tests validate that a pod network implementation correctly integrates with `PodNetworkKind` and the Kubernetes Resource API. These tests ensure that pod networks are discoverable, selectable, and observable using standard Kubernetes mechanisms.
 
 Conformance tests validate:
-* CRD Category: A pod network implementation must include the `podnetwork` and `podnetworks` categories in its CRD.
-  1. The CRD referenced by a `PodNetworkKind` includes `podnetwork` and `podnetworks` in its `spec.names.categories`.
+* Resource type Category: A pod network implementation must include the `podnetwork` and `podnetworks` categories in its resource type definition.
+  1. The resource type referenced by a `PodNetworkKind` includes `podnetwork` and `podnetworks` in its categories.
   2. Pod network objects of the referenced Group/Kind are listed when querying the `podnetwork` category (e.g., `kubectl get podnetwork`).
 * ResourceSlice Advertisement: A pod network implementation must advertise each pod network instance using a ResourceSlice.
   1. For every pod network object matching the Group/Kind referenced by a `PodNetworkKind`, at least one ResourceSlice is created.
@@ -671,7 +648,7 @@ spec:
     targetPort: 9376
 status:
   podNetwork:
-    kind: userdefinednetwork # userdefinednetwork is the default PodNetworkKind in this example, the status.Kind is resolved and set by a controller.
+    kind: userdefinednetwork # userdefinednetwork is the default PodNetworkKind in this example, the status.podNetwork.kind is resolved and set by a controller.
     name: blue-network
     namespace: default # The namespace was omitted in the spec, but resolved automatically in the status by a controller.
 ```
@@ -682,7 +659,7 @@ status:
 
 An alternative approach discussed was the introduction of a `PodNetwork` API representing a pod network instance directly.
 
-In this model, `PodNetwork` is a cluster-scoped object containing a small set of common, implementation-agnostic fields (such as `provider` and `networkRef`). Rather than embedding implementation-specific networking semantics into a single monolithic API, the `PodNetwork` object references a separate, implementation-defined Custom Resource (CR) describing the actual network configuration:
+In this model, `PodNetwork` is a cluster-scoped object containing a small set of common, implementation-agnostic fields (such as `provider` and `networkRef`). Rather than embedding implementation-specific networking semantics into a single monolithic API, the `PodNetwork` object references a separate, implementation-defined resource describing the actual network configuration:
 
 ```yaml
 apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
