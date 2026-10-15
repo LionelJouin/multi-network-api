@@ -42,14 +42,6 @@ type PodNetworkKindSpec struct {
   // The ImplementationType may reference either a namespace-scoped or a cluster-scoped resource type.
   // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.implementationType is immutable"
   ImplementationType metav1.GroupKind
-
-  // DefaultKind indicates whether this PodNetworkKind requests to be the default for the cluster.
-  // If true, this PodNetworkKind is requesting to be the default for the cluster.
-  // If false, this PodNetworkKind is not requesting to be the default for the cluster.
-  // If not specified, the default is false.
-  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.defaultKind is immutable"
-  // +optional
-  DefaultKind *bool
 }
 
 // PodNetworkKindStatus describes the observed state of the PodNetworkKind.
@@ -59,16 +51,6 @@ type PodNetworkKindStatus struct {
   // +listType=map
   // +listMapKey=type
   Conditions []metav1.Condition
-
-  // DefaultKind indicates whether this PodNetworkKind has been selected to be the default for the cluster.
-  // When multiple PodNetworkKinds have spec.defaultKind set to true, the candidate selected as default 
-  // is the oldest PodNetworkKind determined by metadata.creationTimestamp. If timestamps are equal, the 
-  // candidate selected as default is the one with the first name in the list sorted in alphabetical order.
-  // If another PodNetworkKind is already the active default PodNetworkKind, this field will be false even if 
-  // spec.defaultKind is true, and a condition will be set to indicate that the default PodNetworkKind 
-  // is already set.
-  // +optional
-  DefaultKind *bool
 }
 
 // Well-known condition types for PodNetworkKinds.
@@ -76,11 +58,6 @@ const (
   // PodNetworkKindConditionImplementationTypeReady indicates whether the resource type referenced by the
   // PodNetworkKind's ImplementationType exists and is ready in the cluster.
   PodNetworkKindConditionImplementationTypeReady = "ImplementationTypeReady"
-
-  // PodNetworkKindConditionDefaultKind indicates whether this PodNetworkKind has been selected 
-  // to be the default for the cluster.
-  // This condition is added only when the spec.defaultKind is true.
-  PodNetworkKindConditionDefaultKind = "DefaultKind"
 )
 
 // Well-known condition reasons for PodNetworkKinds.
@@ -99,14 +76,12 @@ const (
   // PodNetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
   // that the resource type referenced by the PodNetworkKind's ImplementationType exists and is ready.
   PodNetworkKindReasonCompliant string = "Compliant"
+)
 
-  // PodNetworkKindReasonDefaultKindSet in the DefaultKind condition indicates
-  // that this PodNetworkKind has been selected to be the default for the cluster.
-  PodNetworkKindReasonDefaultKindSet string = "DefaultKindSet"
-  // PodNetworkKindReasonDefaultKindAlreadySet in the DefaultKind condition indicates 
-  // that this PodNetworkKind cannot be set as the default for the cluster because another 
-  // PodNetworkKind is already set as the default.
-  PodNetworkKindReasonDefaultKindAlreadySet string = "DefaultKindAlreadySet"
+// Well-known PodNetworkKind names.
+const (
+  // DefaultPodNetworkKindName is the reserved name for the default PodNetworkKind.
+  DefaultPodNetworkKindName = "default"
 )
 
 // Finalizers for PodNetworkKinds.
@@ -136,7 +111,7 @@ A device that attaches a workload to a pod network must report the associated Re
 ```golang
 const (
   // StandardDeviceAttributePrefix is the prefix used for standard device attributes.
-  StandardDeviceAttributePrefix = "multinetwork.networking.k8s.io" 
+  StandardDeviceAttributePrefix = "multinetwork.networking.x-k8s.io" 
 
   // StandardDeviceAttributePodNetwork is a standard device attribute name
   // which describes a pod network.
@@ -258,14 +233,14 @@ default     userdefinednetworks.k8s.ovn.org/red-network    45s
 
 ### Default PodNetworkKind
 
-A cluster administrator can designate a `PodNetworkKind` as the cluster-wide default by setting `spec.defaultKind: true`.
+A cluster administrator can designate a `PodNetworkKind` as the cluster-wide default by naming it `default` (`metadata.name: default`).
 
 In many clusters, only a single pod network implementation is installed, or one particular network type serves as the primary standard. Requiring users, manifests, and ecosystem APIs to always explicitly qualify network references with a `PodNetworkKind` introduces unnecessary verbosity and couples configurations to specific implementation types.
 
-The default `PodNetworkKind` provides a cluster-wide fallback whenever the `kind` is omitted from a network reference:
+The default `PodNetworkKind` (named `default`) provides a cluster-wide fallback whenever the `kind` is omitted from a network reference:
 * **Workload & ResourceClaim Portability:** Users can request attachment to a pod network simply by specifying the network name (and namespace, if applicable), without needing to know or hardcode the underlying implementation's `PodNetworkKind`.
-* **Generic DeviceClasses:** Cluster administrators can define a common `DeviceClass` targeting the default `PodNetworkKind`. Workload manifests can then reference this standard class across environments regardless of the specific network provider deployed in the cluster.
-* **Ecosystem API Integration:** High-level abstractions (e.g. Services, Gateway API routes, NetworkPolicies...) targeting pod networks can accept simple network name references and automatically resolve them to the default `PodNetworkKind`.
+* **Generic DeviceClasses:** Cluster administrators can define a common `DeviceClass` targeting the default `PodNetworkKind` (`default`). Workload manifests can then reference this standard class across environments regardless of the specific network provider deployed in the cluster.
+* **Ecosystem API Integration:** High-level abstractions (e.g. Services, Gateway API routes, NetworkPolicies...) targeting pod networks can accept simple network name references and automatically resolve them to the `PodNetworkKind` named `default`.
 
 Cluster administrators can define a `DeviceClass` targeting the default `PodNetworkKind`:
 
@@ -277,7 +252,7 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: device.attributes["multinetwork.networking.k8s.io"].podNetworkKind == "userdefinednetwork" && has(device.attributes["multinetwork.networking.k8s.io"].podNetwork)
+      expression: device.attributes["multinetwork.networking.x-k8s.io"].podNetworkKind == "default" && has(device.attributes["multinetwork.networking.x-k8s.io"].podNetwork)
 ```
 
 ### Example
@@ -303,7 +278,7 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: device.attributes["multinetwork.networking.k8s.io"].podNetworkKind == "userdefinednetwork"
+      expression: device.attributes["multinetwork.networking.x-k8s.io"].podNetworkKind == "userdefinednetwork"
 ```
 
 A pod network is declaratively defined using an implementation-specific pod network object. The pod network implementation prepares the underlying networking resources and advertises the availability of the pod network via the Resource API using a ResourceSlice.
@@ -324,11 +299,11 @@ metadata:
 spec:
   devices:
   - attributes:
-      multinetwork.networking.k8s.io/podNetwork:
+      multinetwork.networking.x-k8s.io/podNetwork:
         string: blue-network
-      multinetwork.networking.k8s.io/podNetworkNamespace:
+      multinetwork.networking.x-k8s.io/podNetworkNamespace:
         string: default
-      multinetwork.networking.k8s.io/podNetworkKind:
+      multinetwork.networking.x-k8s.io/podNetworkKind:
         string: userdefinednetwork
     name: blue-network-resource
   driver: udn.ovn-kubernetes.io
@@ -352,7 +327,7 @@ spec:
         deviceClassName: ovn-kubernetes-udn
         selectors:
           - cel:
-              expression: device.attributes["multinetwork.networking.k8s.io"].podNetwork == "blue-network" && device.attributes["multinetwork.networking.k8s.io"].podNetworkNamespace == "default"
+              expression: device.attributes["multinetwork.networking.x-k8s.io"].podNetwork == "blue-network" && device.attributes["multinetwork.networking.x-k8s.io"].podNetworkNamespace == "default"
 ```
 
 Once the workload is attached to the pod network, the pod network implementation reports the attachment details in the ResourceClaim device status. This includes the `podNetwork` reference in the `data` field, as well as implementation-specific connection data in `networkData` such as interface name, hardware address, and assigned IPs.
@@ -402,51 +377,27 @@ Here is a diagram below representing the pod creation and its attachment to a po
 
 #### Default PodNetworkKind Example
 
-A `PodNetworkKind` successfully selected as the cluster default:
+A `PodNetworkKind` designated as the cluster default by naming it `default`:
 
 ```yaml
 apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
 kind: PodNetworkKind
 metadata:
-  name: userdefinednetwork
+  name: default
 spec:
   implementationType:
     group: k8s.ovn.org
     kind: UserDefinedNetwork
-  defaultKind: true
 status:
-  defaultKind: true
   conditions:
-  - type: DefaultKind
+  - type: ImplementationTypeReady
     status: "True"
     lastTransitionTime: "2026-09-16T14:19:25Z"
-    reason: DefaultKindSet
-    message: "This PodNetworkKind is set as the default for the cluster."
+    reason: Compliant
+    message: "The resource type referenced by implementationType exists and is ready."
 ```
 
-A second `PodNetworkKind` requesting default status while an active default is already present (note the use of `spec.defaultKind`):
-
-```yaml
-apiVersion: multinetwork.networking.x-k8s.io/v1alpha1
-kind: PodNetworkKind
-metadata:
-  name: secondary-network-kind
-spec:
-  implementationType:
-    group: example.com
-    kind: SecondaryNetwork
-  defaultKind: true
-status:
-  defaultKind: false
-  conditions:
-  - type: DefaultKind
-    status: "False"
-    lastTransitionTime: "2026-09-16T14:20:00Z"
-    reason: DefaultKindAlreadySet
-    message: "Another PodNetworkKind is already set as the default for the cluster."
-```
-
-An example `DeviceClass` that selects the default `PodNetworkKind`, an administrator would create to ensure the current default is always selected:
+An example `DeviceClass` that selects the default `PodNetworkKind`:
 ```yaml
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
@@ -455,7 +406,7 @@ metadata:
 spec:
   selectors:
   - cel:
-      expression: device.attributes["multinetwork.networking.k8s.io"].podNetworkKind == "userdefinednetwork" && has(device.attributes["multinetwork.networking.k8s.io"].podNetwork)
+      expression: device.attributes["multinetwork.networking.x-k8s.io"].podNetworkKind == "default" && has(device.attributes["multinetwork.networking.x-k8s.io"].podNetwork)
 ```
 
 An example `ResourceClaim` that requests a device from the default `PodNetworkKind`:
@@ -472,7 +423,7 @@ spec:
         deviceClassName: default-network-kind
         selectors:
           - cel:
-              expression: device.attributes["multinetwork.networking.k8s.io"].podNetwork == "blue-network"
+              expression: device.attributes["multinetwork.networking.x-k8s.io"].podNetwork == "blue-network"
 ```
 
 ### Implementation
@@ -495,7 +446,7 @@ The controller must enforce the following:
   * The condition is set to `False` with the reason `MissingRBAC` if the necessary RBAC permissions are missing.
   * The condition is set to `False` with the reason `TypeConflict` if another `PodNetworkKind` already references the same Group/Kind.
 
-* DefaultKind Condition and Status: The controller must manage default `PodNetworkKind` selection. When one or more `PodNetworkKind` objects have `spec.defaultKind: true`, the controller determines the active default by selecting the candidate with the oldest `metadata.creationTimestamp`. If timestamps are equal, the candidate selected as default is the one with the first name in the list sorted in alphabetical order. For the selected candidate, it sets `status.defaultKind: true` and condition `DefaultKind` to `True` with reason `DefaultKindSet`. For any other candidate requesting default status, it sets `status.defaultKind: false` and condition `DefaultKind` to `False` with reason `DefaultKindAlreadySet`. If the active default is deleted, the controller reconciles remaining candidates with `spec.defaultKind: true` and promotes the oldest candidate via `metadata.creationTimestamp` (with alphabetical tie-breaking) to become the new active default. For PodNetworkKinds where `spec.defaultKind` is false or omitted, the `DefaultKind` condition is not added.
+* Default PodNetworkKind Resolution: When a network reference omits the `kind`, higher-level controllers and abstractions resolve it to the `PodNetworkKind` named `default`. Uniqueness is guaranteed by Kubernetes standard resource naming (only one cluster-scoped `PodNetworkKind` named `default` can exist at a time).
 
 #### E2E Tests
 
@@ -509,8 +460,7 @@ E2E tests validate:
   4. After deleting all pod network objects of the referenced Group/Kind, the controller removes the finalizer and deleting the `PodNetworkKind` completes.
 * Immutability:
   1. Updating the `spec.implementationType` of an existing `PodNetworkKind` (e.g., changing the Group/Kind) is rejected.
-  2. Updating the `spec.defaultKind` of an existing `PodNetworkKind` is rejected.
-  3. Updating the `metadata` (e.g., labels, annotations) of an existing `PodNetworkKind` succeeds.
+  2. Updating the `metadata` (e.g., labels, annotations) of an existing `PodNetworkKind` succeeds.
 * ImplementationTypeReady Condition:
   1. Creating a `PodNetworkKind` referencing an existing and ready resource type results in the `ImplementationTypeReady` condition being set to `True` with reason `Compliant`.
   2. Creating a `PodNetworkKind` referencing a non-existent resource type results in the `ImplementationTypeReady` condition being set to `False` with reason `ResourceTypeNotFound`.
@@ -520,13 +470,8 @@ E2E tests validate:
   6. After deleting the first `PodNetworkKind`, the second `PodNetworkKind` has its `ImplementationTypeReady` condition updated to `True`.
   7. Creating a `PodNetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
   8. Granting sufficient RBAC permissions to a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True`.
-* DefaultKind Condition:
-  1. Creating a `PodNetworkKind` with `spec.defaultKind: false` or omitted results in no `DefaultKind` condition being added and `status.defaultKind` not set to `true`.
-  2. Creating a `PodNetworkKind` with `spec.defaultKind: true` when no default exists results in `status.defaultKind: true` and `DefaultKind` condition set to `True` with reason `DefaultKindSet`.
-  3. Creating subsequent `PodNetworkKind` objects (e.g., PodNetworkKind B and PodNetworkKind C) with `spec.defaultKind: true` while an active default (PodNetworkKind A) exists results in both PodNetworkKind B and C having `status.defaultKind: false` and `DefaultKind` condition set to `False` with reason `DefaultKindAlreadySet`.
-  4. Creating two `PodNetworkKind` objects with `spec.defaultKind: true` and identical `metadata.creationTimestamp` results in the one with alphabetically earlier name being selected as default (i.e., `status.defaultKind: true`).
-  5. Deleting the active default `PodNetworkKind` (A) when multiple PodNetworkKinds remain (PodNetworkKind B created before PodNetworkKind C) results in PodNetworkKind B (the oldest remaining PodNetworkKind by `metadata.creationTimestamp`) being promoted to `status.defaultKind: true` and condition `DefaultKind` updated to `True` with reason `DefaultKindSet`, while PodNetworkKind C remains `status.defaultKind: false` with reason `DefaultKindAlreadySet`.
-  6. Deleting PodNetworkKind B results in PodNetworkKind C being promoted to `status.defaultKind: true` and condition `DefaultKind` updated to `True` with reason `DefaultKindSet`.
+* Default PodNetworkKind:
+  1. Creating a `PodNetworkKind` named `default` succeeds and serves as the default PodNetworkKind.
 
 #### Conformance Tests
 
@@ -539,12 +484,12 @@ Conformance tests validate:
 * ResourceSlice Advertisement: A pod network implementation must advertise each pod network instance using a ResourceSlice.
   1. For every pod network object matching the Group/Kind referenced by a `PodNetworkKind`, at least one ResourceSlice is created.
   2. Each advertised device includes the following attributes:
-    * `multinetwork.networking.k8s.io/podNetwork`, identifying the pod network instance.
-    * `multinetwork.networking.k8s.io/podNetworkKind`, identifying the corresponding PodNetworkKind.
-    * `multinetwork.networking.k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespace-scoped. This attribute must not exist if the pod network object is cluster-scoped.
+    * `multinetwork.networking.x-k8s.io/podNetwork`, identifying the pod network instance.
+    * `multinetwork.networking.x-k8s.io/podNetworkKind`, identifying the corresponding PodNetworkKind.
+    * `multinetwork.networking.x-k8s.io/podNetworkNamespace`, identifying the kubernetes namespace of the pod network instance if the pod network object is namespace-scoped. This attribute must not exist if the pod network object is cluster-scoped.
   3. The advertised attributes accurately reflect the pod network object name, namespace (if applicable) and kind.
 * ResourceClaim Pod Network Selection: A pod network implementation must support attaching a Pod to a pod network via ResourceClaim selection using standard device attributes.
-  1. A ResourceClaim selecting a pod network via the `multinetwork.networking.k8s.io/podNetwork`, the `multinetwork.networking.k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.k8s.io/podNetworkKind` attributes can be successfully allocated.
+  1. A ResourceClaim selecting a pod network via the `multinetwork.networking.x-k8s.io/podNetwork`, the `multinetwork.networking.x-k8s.io/podNetworkNamespace` (if applicable) and the `multinetwork.networking.x-k8s.io/podNetworkKind` attributes can be successfully allocated.
   2. The allocation results in a device being bound to the ResourceClaim.
   3. The selected device corresponds to a pod network advertised via a ResourceSlice.
 * ResourceClaim Pod Network Status Reporting: A pod network implementation must report network attachment status through the ResourceClaim device status.
@@ -611,9 +556,9 @@ type ServiceStatus struct {
   // This field is set by the PodNetworkKind controller and reflects the actual pod network
   // the Service is applied to.
   //
-  // If the spec.PodNetwork.Kind is nil, then the PodNetworkKind controller will find the default 
-  // PodNetworkKind and set the status.PodNetwork.Kind to the default PodNetworkKind. 
-  // If there is no default PodNetworkKind, the status.PodNetwork.Kind will be nil and a warning 
+  // If the spec.PodNetwork.Kind is nil, then the PodNetworkKind controller will look for the default 
+  // PodNetworkKind (named "default") and set the status.PodNetwork.Kind to "default". 
+  // If no PodNetworkKind named "default" exists in the cluster, the status.PodNetwork.Kind will be nil and a warning 
   // condition will be set to indicate that no default PodNetworkKind is available.
   // If the spec.PodNetwork.Kind is not nil, then the PodNetworkKind controller will set the 
   // status.PodNetwork.Kind to the spec.PodNetwork.Kind.
@@ -648,7 +593,7 @@ spec:
     targetPort: 9376
 status:
   podNetwork:
-    kind: userdefinednetwork # userdefinednetwork is the default PodNetworkKind in this example, the status.podNetwork.kind is resolved and set by a controller.
+    kind: default # "default" is the default PodNetworkKind name, resolved and set by a controller.
     name: blue-network
     namespace: default # The namespace was omitted in the spec, but resolved automatically in the status by a controller.
 ```
