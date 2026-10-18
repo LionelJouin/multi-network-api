@@ -71,7 +71,10 @@ const (
   // PodNetworkKind's ImplementationType.
   PodNetworkKindReasonMissingRBAC string = "MissingRBAC"
   // PodNetworkKindReasonTypeConflict in the ImplementationTypeReady condition indicates
-  // that another PodNetworkKind with the same type already exists in the cluster.
+  // that another PodNetworkKind already references the same ImplementationType (Group/Kind).
+  // A PodNetworkKind is considered valid only if it is strictly the oldest object by
+  // metadata.creationTimestamp; any newer PodNetworkKind receives this reason.
+  // If multiple PodNetworkKinds share the same creationTimestamp, all of them receive this reason.
   PodNetworkKindReasonTypeConflict string = "TypeConflict"
   // PodNetworkKindReasonCompliant in the ImplementationTypeReady condition indicates
   // that the resource type referenced by the PodNetworkKind's ImplementationType exists and is ready.
@@ -466,10 +469,11 @@ E2E tests validate:
   2. Creating a `PodNetworkKind` referencing a non-existent resource type results in the `ImplementationTypeReady` condition being set to `False` with reason `ResourceTypeNotFound`.
   3. Deleting the resource type referenced by a `PodNetworkKind` results in the `ImplementationTypeReady` condition being updated to `False` with reason `ResourceTypeNotFound`.
   4. Creating the resource type referenced by a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True`.
-  5. Creating a second `PodNetworkKind` referencing the same Group/Kind as an existing `PodNetworkKind` results in `ImplementationTypeReady` condition set to `False` with reason `TypeConflict`.
-  6. After deleting the first `PodNetworkKind`, the second `PodNetworkKind` has its `ImplementationTypeReady` condition updated to `True`.
-  7. Creating a `PodNetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
-  8. Granting sufficient RBAC permissions to a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True`.
+  5. Creating a second `PodNetworkKind` referencing the same Group/Kind as an existing (older) `PodNetworkKind` results in the second `PodNetworkKind` having `ImplementationTypeReady` condition set to `False` with reason `TypeConflict`, while the older remains `True` with reason `Compliant`.
+  6. Creating two `PodNetworkKind` objects referencing the same Group/Kind with identical `metadata.creationTimestamp` results in both objects having `ImplementationTypeReady` condition set to `False` with reason `TypeConflict`.
+  7. After deleting one of the conflicting `PodNetworkKind` objects, the remaining `PodNetworkKind` has its `ImplementationTypeReady` condition updated to `True` (assuming its resource type is ready).
+  8. Creating a `PodNetworkKind` without sufficient RBAC permissions results in the `ImplementationTypeReady` condition being set to `False` with reason `MissingRBAC`.
+  9. Granting sufficient RBAC permissions to a `PodNetworkKind` that previously had `ImplementationTypeReady` set to `False` results in the condition being updated to `True`.
 * Default PodNetworkKind:
   1. Creating a `PodNetworkKind` named `default` succeeds and serves as the default PodNetworkKind.
 
