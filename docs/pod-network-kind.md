@@ -200,7 +200,7 @@ This self-contained reporting model ensures that controllers (e.g. EndpointSlice
 
 Without a common `PodNetwork` API, there is no single resource type that represents all pod networks across implementations. Each implementation defines its own type (e.g. CustomResourceDefinition), so discovering all pod networks in a cluster requires knowing every implementation-specific type.
 
-To address this, pod network implementations must register their resource type under the `podnetwork` and `podnetworks` categories. Resource type categories allow `kubectl` to aggregate resources of different types under a single alias, enabling users to list all pod networks across all implementations with a single command: `kubectl get podnetworks`.
+To address this, pod network implementations must register their resource type under the `podnetworks` category. Resource type categories allow `kubectl` to aggregate resources of different types under a single alias, enabling users to list all pod networks across all implementations with a single command: `kubectl get podnetworks`.
 
 Below is an example CRD including the required `categories`:
 ```yaml
@@ -218,7 +218,6 @@ spec:
     - udn
     singular: userdefinednetwork
     categories:
-    - podnetwork
     - podnetworks
     - all
 ```
@@ -251,7 +250,7 @@ Cluster administrators can define a `DeviceClass` targeting the default `PodNetw
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
-  name: default-network-kind
+  name: default-pod-network-kind
 spec:
   selectors:
   - cel:
@@ -405,7 +404,7 @@ An example `DeviceClass` that selects the default `PodNetworkKind`:
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
-  name: default-network-kind
+  name: default-pod-network-kind
 spec:
   selectors:
   - cel:
@@ -423,7 +422,7 @@ spec:
     requests:
     - name: blue-network
       exactly:
-        deviceClassName: default-network-kind
+        deviceClassName: default-pod-network-kind
         selectors:
           - cel:
               expression: device.attributes["multinetwork.networking.x-k8s.io"].podNetwork == "blue-network"
@@ -441,7 +440,7 @@ Validation must enforce the following:
 
 The controller must enforce the following:
 
-* Deletion Protection (Finalizer): A `PodNetworkKind` cannot be deleted while pod network objects belonging to it still exist. The controller attaches a finalizer (`multinetwork.networking.x-k8s.io/network-kind-protection`) to each `PodNetworkKind`. When a `PodNetworkKind` is marked for deletion (`metadata.deletionTimestamp` is set), the controller checks whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the controller retains the finalizer to block deletion. Once all pod network objects belonging to that `PodNetworkKind` are deleted, the controller removes the finalizer, allowing the deletion to complete.
+* Deletion Protection (Finalizer): A `PodNetworkKind` cannot be deleted while pod network objects belonging to it still exist. The controller attaches a finalizer (`multinetwork.networking.x-k8s.io/pod-network-kind-protection`) to each `PodNetworkKind`. When a `PodNetworkKind` is marked for deletion (`metadata.deletionTimestamp` is set), the controller checks whether any objects of the referenced Group/Kind exist in the cluster. If at least one such object exists, the controller retains the finalizer to block deletion. Once all pod network objects belonging to that `PodNetworkKind` are deleted, the controller removes the finalizer, allowing the deletion to complete.
 
 * ImplementationTypeReady Condition: The controller must watch `PodNetworkKind` objects and the resource types in the cluster. For each `PodNetworkKind`, the controller must look up the resource type matching the referenced Group/Kind and update the `ImplementationTypeReady` condition accordingly:
   * The condition is set to `True` with the reason `Compliant` if the other reasons for setting it to `False` do not apply.
@@ -457,7 +456,7 @@ E2E tests validate that the `PodNetworkKind` lifecycle and validation constraint
 
 E2E tests validate:
 * Deletion Protection:
-  1. Creating a `PodNetworkKind` results in the controller attaching the `multinetwork.networking.x-k8s.io/network-kind-protection` finalizer.
+  1. Creating a `PodNetworkKind` results in the controller attaching the `multinetwork.networking.x-k8s.io/pod-network-kind-protection` finalizer.
   2. Deleting a `PodNetworkKind` succeeds (finalizer is removed) when no pod network objects of the referenced Group/Kind exist.
   3. Deleting a `PodNetworkKind` is blocked (finalizer is retained) when at least one pod network object of the referenced Group/Kind exists in the cluster.
   4. After deleting all pod network objects of the referenced Group/Kind, the controller removes the finalizer and deleting the `PodNetworkKind` completes.
@@ -482,9 +481,9 @@ E2E tests validate:
 Conformance tests validate that a pod network implementation correctly integrates with `PodNetworkKind` and the Kubernetes Resource API. These tests ensure that pod networks are discoverable, selectable, and observable using standard Kubernetes mechanisms.
 
 Conformance tests validate:
-* Resource type Category: A pod network implementation must include the `podnetwork` and `podnetworks` categories in its resource type definition.
-  1. The resource type referenced by a `PodNetworkKind` includes `podnetwork` and `podnetworks` in its categories.
-  2. Pod network objects of the referenced Group/Kind are listed when querying the `podnetwork` category (e.g., `kubectl get podnetwork`).
+* Resource type Category: A pod network implementation must include the `podnetworks` category in its resource type definition.
+  1. The resource type referenced by a `PodNetworkKind` includes `podnetworks` in its categories.
+  2. Pod network objects of the referenced Group/Kind are listed when querying the `podnetworks` category (e.g., `kubectl get podnetworks`).
 * ResourceSlice Advertisement: A pod network implementation must advertise each pod network instance using a ResourceSlice.
   1. For every pod network object matching the Group/Kind referenced by a `PodNetworkKind`, at least one ResourceSlice is created.
   2. Each advertised device includes the following attributes:
