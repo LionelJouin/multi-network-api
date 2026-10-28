@@ -22,7 +22,7 @@ import (
 
 const (
 	// StandardDeviceAttributePrefix is the prefix used for standard device attributes.
-	StandardDeviceAttributePrefix = "multinetwork.networking.k8s.io"
+	StandardDeviceAttributePrefix = "multinetwork.networking.x-k8s.io"
 
 	// StandardDeviceAttributePodNetwork is a standard device attribute name
 	// which describes a pod network.
@@ -32,7 +32,7 @@ const (
 	// StandardDeviceAttributePodNetworkNamespace is a standard device attribute name
 	// which describes the namespace of a pod network.
 	// The value is a string value referring to the namespace of a pod network object.
-	// The attribute is optional for the PodNetworkKind pointing to a non-namespaced GK.
+	// The attribute should not be set for the PodNetworkKind pointing to a non-namespaced GK.
 	// The attribute is mandatory for the PodNetworkKind pointing to a namespaced GK.
 	StandardDeviceAttributePodNetworkNamespace resourceapi.QualifiedName = StandardDeviceAttributePrefix + "/" + "podNetworkNamespace"
 	// StandardDeviceAttributePodNetworkKind is a standard device attribute name

@@ -26,18 +26,17 @@ import (
 	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
-	Context("CRD presence (CRDNotFound)", func() {
-		It("should report False when CRD is missing, turn True when created, and turn back False when deleted", func(ctx context.Context) {
-			group := "crdpresence.e2e.example.com"
+	Context("Resource Type presence (ResourceTypeNotFound)", func() {
+		It("should report False when Resource Type is missing, turn True when created, and turn back False when deleted", func(ctx context.Context) {
+			group := "resourcetype.presence.e2e.example.com"
 			kind := "PresenceNet"
 			plural := "presencenets"
-			crdName := plural + "." + group
-			pnkName := "e2e-crd-presence"
+			resourceTypeName := plural + "." + group
+			pnkName := "e2e-resource-type-presence"
 
 			By("granting RBAC permissions to the controller in advance")
 			grantRBAC(ctx, "e2e-presence-reader", group, plural)
@@ -52,7 +51,7 @@ var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
 				},
 			}
 
-			By("creating the PodNetworkKind before the CRD exists")
+			By("creating the PodNetworkKind before the Resource Type exists")
 			_, err := multinetworkClient.PodNetworkKinds().Create(ctx, pnk, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "failed to create PodNetworkKind")
 
@@ -60,19 +59,19 @@ var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
 				_ = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkName, metav1.DeleteOptions{})
 			})
 
-			By("waiting for ImplementationTypeReady=False with reason CRDNotFound")
+			By("waiting for ImplementationTypeReady=False with reason ResourceTypeNotFound")
 			Eventually(func(g Gomega) {
 				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
 				g.Expect(err).NotTo(HaveOccurred())
 				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
 				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCRDNotFound))
-				g.Expect(cond.Message).To(Equal("CRD not found"))
+				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonResourceTypeNotFound))
+				g.Expect(cond.Message).To(Equal("Resource Type not found"))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 
-			By("creating the compliant CRD")
-			createCRD(ctx, crdName, group, kind, plural, []string{"podnetwork", "podnetworks"})
+			By("creating the compliant Resource Type")
+			createCRD(ctx, resourceTypeName, group, kind, plural)
 
 			By("waiting for ImplementationTypeReady to turn True with reason Compliant")
 			Eventually(func(g Gomega) {
@@ -84,205 +83,36 @@ var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
 				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCompliant))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 
-			By("deleting the CRD to make the condition unmet again")
-			err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName, metav1.DeleteOptions{})
+			By("deleting the Resource Type to make the condition unmet again")
+			err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, resourceTypeName, metav1.DeleteOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("waiting for ImplementationTypeReady to turn back False with reason CRDNotFound")
+			By("waiting for ImplementationTypeReady to turn back False with reason ResourceTypeNotFound")
 			Eventually(func(g Gomega) {
 				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
 				g.Expect(err).NotTo(HaveOccurred())
 				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
 				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCRDNotFound))
-				g.Expect(cond.Message).To(Equal("CRD not found"))
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-		})
-	})
-
-	Context("CRD readiness (CRDNotReady)", func() {
-		It("should report False when CRD names conflict, turn True when conflict resolved, and turn back False when conflict reintroduced", func(ctx context.Context) {
-			group := "crdreadiness.e2e.example.com"
-			sharedListKind := "SharedConflictList"
-			kind1 := "ConflictKindOne"
-			plural1 := "conflictkindones"
-			crdName1 := plural1 + "." + group
-
-			kind2 := "ConflictKindTwo"
-			plural2 := "conflictkindtwos"
-			crdName2 := plural2 + "." + group
-			pnkName := "e2e-crd-not-ready"
-			rbacName := "e2e-crd-not-ready-reader"
-
-			By("granting RBAC permissions to the controller in advance")
-			grantRBAC(ctx, rbacName, group, plural2)
-			DeferCleanup(func(ctx context.Context) {
-				deleteRBAC(ctx, rbacName)
-			})
-
-			By("creating the first CRD occupying the listKind")
-			createCRDWithListKind(ctx, crdName1, group, kind1, plural1, sharedListKind, nil)
-			DeferCleanup(func(ctx context.Context) {
-				_ = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName1, metav1.DeleteOptions{})
-			})
-
-			By("creating the second CRD with conflicting listKind")
-			createCRDUnestablished(ctx, crdName2, group, kind2, plural2, sharedListKind, []string{"podnetwork", "podnetworks"})
-			DeferCleanup(func(ctx context.Context) {
-				_ = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName2, metav1.DeleteOptions{})
-			})
-
-			pnk := &v1alpha1.PodNetworkKind{
-				ObjectMeta: metav1.ObjectMeta{Name: pnkName},
-				Spec: v1alpha1.PodNetworkKindSpec{
-					ImplementationType: metav1.GroupKind{Group: group, Kind: kind2},
-				},
-			}
-
-			By("creating the PodNetworkKind referencing the unready CRD")
-			_, err := multinetworkClient.PodNetworkKinds().Create(ctx, pnk, metav1.CreateOptions{})
-			Expect(err).NotTo(HaveOccurred(), "failed to create PodNetworkKind")
-
-			DeferCleanup(func(ctx context.Context) {
-				_ = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkName, metav1.DeleteOptions{})
-			})
-
-			By("waiting for ImplementationTypeReady=False with reason CRDNotReady")
-			Eventually(func(g Gomega) {
-				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
-				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
-				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCRDNotReady))
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-
-			By("deleting the first CRD to resolve the conflict")
-			err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName1, metav1.DeleteOptions{})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("waiting for ImplementationTypeReady to turn True with reason Compliant")
-			Eventually(func(g Gomega) {
-				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
-				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
-				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCompliant))
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-
-			By("re-introducing conflict by deleting second CRD, recreating first CRD, and recreating second CRD")
-			err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName2, metav1.DeleteOptions{})
-			Expect(err).NotTo(HaveOccurred())
-			Eventually(func() bool {
-				_, getErr := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crdName2, metav1.GetOptions{})
-				return apierrors.IsNotFound(getErr)
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(BeTrue())
-
-			createCRDWithListKind(ctx, crdName1, group, kind1, plural1, sharedListKind, nil)
-			createCRDUnestablished(ctx, crdName2, group, kind2, plural2, sharedListKind, []string{"podnetwork", "podnetworks"})
-
-			By("waiting for ImplementationTypeReady to turn back False with reason CRDNotReady")
-			Eventually(func(g Gomega) {
-				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
-				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
-				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCRDNotReady))
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-		})
-	})
-
-	Context("CRD categories (CRDMissingCategories)", func() {
-		It("should report False when categories are missing, turn True when added, and turn back False when removed", func(ctx context.Context) {
-			group := "crdcats.e2e.example.com"
-			kind := "CatNet"
-			plural := "catnets"
-			crdName := plural + "." + group
-			pnkName := "e2e-crd-categories"
-
-			By("granting RBAC permissions to the controller in advance")
-			grantRBAC(ctx, "e2e-cats-reader", group, plural)
-			DeferCleanup(func(ctx context.Context) {
-				deleteRBAC(ctx, "e2e-cats-reader")
-			})
-
-			By("creating a CRD without categories")
-			createCRD(ctx, crdName, group, kind, plural, []string{})
-			DeferCleanup(func(ctx context.Context) {
-				_ = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName, metav1.DeleteOptions{})
-			})
-
-			pnk := &v1alpha1.PodNetworkKind{
-				ObjectMeta: metav1.ObjectMeta{Name: pnkName},
-				Spec: v1alpha1.PodNetworkKindSpec{
-					ImplementationType: metav1.GroupKind{Group: group, Kind: kind},
-				},
-			}
-
-			By("creating the PodNetworkKind referencing the CRD without categories")
-			_, err := multinetworkClient.PodNetworkKinds().Create(ctx, pnk, metav1.CreateOptions{})
-			Expect(err).NotTo(HaveOccurred(), "failed to create PodNetworkKind")
-
-			DeferCleanup(func(ctx context.Context) {
-				_ = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkName, metav1.DeleteOptions{})
-			})
-
-			By("waiting for ImplementationTypeReady=False with reason CRDMissingCategories")
-			Eventually(func(g Gomega) {
-				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
-				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCRDMissingCategories))
-				g.Expect(cond.Message).To(ContainSubstring("CRD is missing mandatory category"))
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-
-			By("updating the CRD to add the mandatory categories")
-			updateCRDCategories(ctx, crdName, []string{"podnetwork", "podnetworks"})
-
-			By("waiting for ImplementationTypeReady to turn True with reason Compliant")
-			Eventually(func(g Gomega) {
-				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
-				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCompliant))
-			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-
-			By("updating the CRD to remove mandatory categories again")
-			updateCRDCategories(ctx, crdName, []string{})
-
-			By("waiting for ImplementationTypeReady to turn back False with reason CRDMissingCategories")
-			Eventually(func(g Gomega) {
-				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
-				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCRDMissingCategories))
-				g.Expect(cond.Message).To(ContainSubstring("CRD is missing mandatory category"))
+				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonResourceTypeNotFound))
+				g.Expect(cond.Message).To(Equal("Resource Type not found"))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 		})
 	})
 
 	Context("RBAC permissions (MissingRBAC)", func() {
 		It("should report False when RBAC is missing, turn True when granted, and turn back False when revoked", func(ctx context.Context) {
-			group := "crdrbac.e2e.example.com"
+			group := "resourcetype.rbac.e2e.example.com"
 			kind := "RbacNet"
 			plural := "rbacnets"
-			crdName := plural + "." + group
-			pnkName := "e2e-crd-rbac"
+			resourceTypeName := plural + "." + group
+			pnkName := "e2e-resource-type-rbac"
 			rbacName := "e2e-rbac-test-reader"
 
-			By("creating a compliant CRD without granting RBAC")
-			createCRD(ctx, crdName, group, kind, plural, []string{"podnetwork", "podnetworks"})
+			By("creating a compliant Resource Type without granting RBAC")
+			createCRD(ctx, resourceTypeName, group, kind, plural)
 			DeferCleanup(func(ctx context.Context) {
-				_ = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, crdName, metav1.DeleteOptions{})
+				_ = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, resourceTypeName, metav1.DeleteOptions{})
 			})
 
 			pnk := &v1alpha1.PodNetworkKind{
@@ -292,7 +122,7 @@ var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
 				},
 			}
 
-			By("creating the PodNetworkKind referencing the CRD without RBAC")
+			By("creating the PodNetworkKind referencing the Resource Type without RBAC")
 			_, err := multinetworkClient.PodNetworkKinds().Create(ctx, pnk, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "failed to create PodNetworkKind")
 
@@ -310,7 +140,7 @@ var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
 				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonMissingRBAC))
-				g.Expect(cond.Message).To(Equal("Insufficient permissions to access the Custom Resources"))
+				g.Expect(cond.Message).To(Equal("Insufficient permissions to access the Resources"))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 
 			By("granting RBAC permissions to the controller")
@@ -337,7 +167,99 @@ var _ = Describe("PodNetworkKind ImplementationTypeReady Condition", func() {
 				g.Expect(cond).NotTo(BeNil(), "ImplementationTypeReady condition not found")
 				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonMissingRBAC))
-				g.Expect(cond.Message).To(Equal("Insufficient permissions to access the Custom Resources"))
+				g.Expect(cond.Message).To(Equal("Insufficient permissions to access the Resources"))
+			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
+		})
+	})
+
+	Context("Type Conflict (TypeConflict)", func() {
+		It("should report TypeConflict on newer PodNetworkKind and Compliant on older PodNetworkKind, and turn True when conflict is deleted", func(ctx context.Context) {
+			group := "resourcetype.conflict.e2e.example.com"
+			kind := "ConflictNet"
+			plural := "conflictnets"
+			resourceTypeName := plural + "." + group
+			pnkOlderName := "e2e-type-conflict-older"
+			pnkNewerName := "e2e-type-conflict-newer"
+			rbacName := "e2e-conflict-reader"
+
+			By("granting RBAC permissions to the controller in advance")
+			grantRBAC(ctx, rbacName, group, plural)
+			DeferCleanup(func(ctx context.Context) {
+				deleteRBAC(ctx, rbacName)
+			})
+
+			By("creating the compliant Resource Type")
+			createCRD(ctx, resourceTypeName, group, kind, plural)
+			DeferCleanup(func(ctx context.Context) {
+				_ = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, resourceTypeName, metav1.DeleteOptions{})
+			})
+
+			By("creating the first (older) PodNetworkKind")
+			pnkOlder := &v1alpha1.PodNetworkKind{
+				ObjectMeta: metav1.ObjectMeta{Name: pnkOlderName},
+				Spec: v1alpha1.PodNetworkKindSpec{
+					ImplementationType: metav1.GroupKind{Group: group, Kind: kind},
+				},
+			}
+			_, err := multinetworkClient.PodNetworkKinds().Create(ctx, pnkOlder, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred(), "failed to create older PodNetworkKind")
+			DeferCleanup(func(ctx context.Context) {
+				_ = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkOlderName, metav1.DeleteOptions{})
+			})
+
+			By("waiting for the older PodNetworkKind to become Compliant")
+			Eventually(func(g Gomega) {
+				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkOlderName, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCompliant))
+			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
+
+			By("creating the second (newer) PodNetworkKind referencing the same GroupKind")
+			pnkNewer := &v1alpha1.PodNetworkKind{
+				ObjectMeta: metav1.ObjectMeta{Name: pnkNewerName},
+				Spec: v1alpha1.PodNetworkKindSpec{
+					ImplementationType: metav1.GroupKind{Group: group, Kind: kind},
+				},
+			}
+			_, err = multinetworkClient.PodNetworkKinds().Create(ctx, pnkNewer, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred(), "failed to create newer PodNetworkKind")
+			DeferCleanup(func(ctx context.Context) {
+				_ = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkNewerName, metav1.DeleteOptions{})
+			})
+
+			By("waiting for the newer PodNetworkKind to report TypeConflict")
+			Eventually(func(g Gomega) {
+				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkNewerName, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonTypeConflict))
+			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
+
+			By("verifying the older PodNetworkKind remains Compliant")
+			older, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkOlderName, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			olderCond := findCondition(older.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
+			Expect(olderCond).NotTo(BeNil())
+			Expect(olderCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(olderCond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCompliant))
+
+			By("deleting the older PodNetworkKind so the newer is promoted")
+			err = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkOlderName, metav1.DeleteOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the remaining PodNetworkKind to become Compliant")
+			Eventually(func(g Gomega) {
+				updated, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkNewerName, metav1.GetOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := findCondition(updated.Status.Conditions, v1alpha1.PodNetworkKindConditionImplementationTypeReady)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal(v1alpha1.PodNetworkKindReasonCompliant))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 		})
 	})
@@ -390,15 +312,12 @@ func deleteRBAC(ctx context.Context, name string) {
 	_ = kubeClient.RbacV1().ClusterRoles().Delete(ctx, name, metav1.DeleteOptions{})
 }
 
-func buildCRD(name, group, kind, plural, listKind string, categories []string) *apiextensionsv1.CustomResourceDefinition {
+func buildCRD(name, group, kind, plural string) *apiextensionsv1.CustomResourceDefinition {
 	names := apiextensionsv1.CustomResourceDefinitionNames{
 		Plural:     plural,
 		Singular:   strings.ToLower(kind),
 		Kind:       kind,
-		Categories: categories,
-	}
-	if listKind != "" {
-		names.ListKind = listKind
+		Categories: v1alpha1.Categories,
 	}
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -422,12 +341,8 @@ func buildCRD(name, group, kind, plural, listKind string, categories []string) *
 	}
 }
 
-func createCRD(ctx context.Context, name, group, kind, plural string, categories []string) *apiextensionsv1.CustomResourceDefinition {
-	return createCRDWithListKind(ctx, name, group, kind, plural, "", categories)
-}
-
-func createCRDWithListKind(ctx context.Context, name, group, kind, plural, listKind string, categories []string) *apiextensionsv1.CustomResourceDefinition {
-	crd := buildCRD(name, group, kind, plural, listKind, categories)
+func createCRD(ctx context.Context, name, group, kind, plural string) *apiextensionsv1.CustomResourceDefinition {
+	crd := buildCRD(name, group, kind, plural)
 	created, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred())
 
@@ -445,31 +360,4 @@ func createCRDWithListKind(ctx context.Context, name, group, kind, plural, listK
 	}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 
 	return created
-}
-
-func createCRDUnestablished(ctx context.Context, name, group, kind, plural, listKind string, categories []string) *apiextensionsv1.CustomResourceDefinition {
-	crd := buildCRD(name, group, kind, plural, listKind, categories)
-	created, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{})
-	Expect(err).NotTo(HaveOccurred())
-
-	Eventually(func(g Gomega) {
-		c, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, name, metav1.GetOptions{})
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(c.Status.Conditions).NotTo(BeEmpty())
-	}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
-
-	return created
-}
-
-func updateCRDCategories(ctx context.Context, name string, categories []string) {
-	Eventually(func(g Gomega) {
-		crd, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, name, metav1.GetOptions{})
-		g.Expect(err).NotTo(HaveOccurred())
-		crd.Spec.Names.Categories = categories
-		_, err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Update(ctx, crd, metav1.UpdateOptions{})
-		if apierrors.IsConflict(err) {
-			return
-		}
-		g.Expect(err).NotTo(HaveOccurred())
-	}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 }

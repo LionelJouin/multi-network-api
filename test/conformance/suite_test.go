@@ -17,6 +17,7 @@ limitations under the License.
 package conformance
 
 import (
+	"context"
 	"flag"
 	"testing"
 	"time"
@@ -24,8 +25,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
 	multinetworkclient "github.com/kubernetes-sigs/multi-network-api/pkg/client/clientset/versioned/typed/apis/v1alpha1"
-	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -42,10 +44,11 @@ var (
 	networkManifest     string
 	testNamespace       string
 
-	kubeClient          kubernetes.Interface
-	apiextensionsClient apiextensionsclientset.Interface
-	multinetworkClient  *multinetworkclient.MultinetworkV1alpha1Client
-	dynamicClient       dynamic.Interface
+	podNetworkKind *v1alpha1.PodNetworkKind
+
+	kubeClient         kubernetes.Interface
+	multinetworkClient *multinetworkclient.MultinetworkV1alpha1Client
+	dynamicClient      dynamic.Interface
 )
 
 func init() {
@@ -60,7 +63,7 @@ func TestConformance(t *testing.T) {
 	RunSpecs(t, "Multi-Network API Conformance Suite")
 }
 
-var _ = BeforeSuite(func() {
+var _ = BeforeSuite(func(ctx context.Context) {
 	Expect(implementationGroup).NotTo(BeEmpty(), "-implementation-group flag is required")
 	Expect(implementationKind).NotTo(BeEmpty(), "-implementation-kind flag is required")
 	Expect(networkManifest).NotTo(BeEmpty(), "-network-manifest flag is required")
@@ -75,12 +78,23 @@ var _ = BeforeSuite(func() {
 	kubeClient, err = kubernetes.NewForConfig(config)
 	Expect(err).NotTo(HaveOccurred(), "failed to create kube client")
 
-	apiextensionsClient, err = apiextensionsclientset.NewForConfig(config)
-	Expect(err).NotTo(HaveOccurred(), "failed to create apiextensions client")
-
 	multinetworkClient, err = multinetworkclient.NewForConfig(config)
 	Expect(err).NotTo(HaveOccurred(), "failed to create multinetwork client")
 
 	dynamicClient, err = dynamic.NewForConfig(config)
 	Expect(err).NotTo(HaveOccurred(), "failed to create dynamic client")
+
+	list, err := multinetworkClient.PodNetworkKinds().List(ctx, metav1.ListOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to list PodNetworkKinds")
+
+	var matching []v1alpha1.PodNetworkKind
+	for _, item := range list.Items {
+		if item.Spec.ImplementationType.Group == implementationGroup && item.Spec.ImplementationType.Kind == implementationKind {
+			matching = append(matching, item)
+		}
+	}
+	Expect(matching).NotTo(BeEmpty(), "no PodNetworkKind found matching group %q and kind %q", implementationGroup, implementationKind)
+	Expect(matching).To(HaveLen(1), "expected exactly 1 PodNetworkKind matching group %q and kind %q, but found %d", implementationGroup, implementationKind, len(matching))
+
+	podNetworkKind = &matching[0]
 })

@@ -25,7 +25,6 @@ import (
 	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 var _ = Describe("PodNetworkKind Validation", func() {
@@ -64,7 +63,7 @@ var _ = Describe("PodNetworkKind Validation", func() {
 					return
 				}
 				g.Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
-				g.Expect(err.Error()).To(ContainSubstring("spec.ImplementationType is immutable"))
+				g.Expect(err.Error()).To(ContainSubstring("spec.implementationType is immutable"))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 
 			By("attempting to update spec.implementationType.kind")
@@ -79,12 +78,12 @@ var _ = Describe("PodNetworkKind Validation", func() {
 					return
 				}
 				g.Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
-				g.Expect(err.Error()).To(ContainSubstring("spec.ImplementationType is immutable"))
+				g.Expect(err.Error()).To(ContainSubstring("spec.implementationType is immutable"))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 		})
 
-		It("should not allow modifying spec.defaultPodNetworkKind", func(ctx context.Context) {
-			pnkName := "e2e-val-immutable-default-pnk"
+		It("should allow updating metadata (labels, annotations)", func(ctx context.Context) {
+			pnkName := "e2e-val-mutable-metadata"
 			pnk := &v1alpha1.PodNetworkKind{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: pnkName,
@@ -92,13 +91,12 @@ var _ = Describe("PodNetworkKind Validation", func() {
 				Spec: v1alpha1.PodNetworkKindSpec{
 					ImplementationType: metav1.GroupKind{
 						Group: "example.com",
-						Kind:  "DefaultNet",
+						Kind:  "InitialNetwork",
 					},
-					DefaultPodNetworkKind: ptr.To(true),
 				},
 			}
 
-			By("creating the PodNetworkKind with defaultPodNetworkKind=true")
+			By("creating the PodNetworkKind")
 			_, err := multinetworkClient.PodNetworkKinds().Create(ctx, pnk, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "failed to create PodNetworkKind")
 
@@ -106,19 +104,29 @@ var _ = Describe("PodNetworkKind Validation", func() {
 				_ = multinetworkClient.PodNetworkKinds().Delete(ctx, pnkName, metav1.DeleteOptions{})
 			})
 
-			By("attempting to update spec.defaultPodNetworkKind")
+			By("updating labels and annotations")
 			Eventually(func(g Gomega) {
 				current, err := multinetworkClient.PodNetworkKinds().Get(ctx, pnkName, metav1.GetOptions{})
 				g.Expect(err).NotTo(HaveOccurred())
+
 				toUpdate := current.DeepCopy()
-				toUpdate.Spec.DefaultPodNetworkKind = ptr.To(false)
-				_, err = multinetworkClient.PodNetworkKinds().Update(ctx, toUpdate, metav1.UpdateOptions{})
-				g.Expect(err).To(HaveOccurred(), "expected error when updating defaultPodNetworkKind")
+				if toUpdate.Labels == nil {
+					toUpdate.Labels = make(map[string]string)
+				}
+				toUpdate.Labels["test-label"] = "updated-value"
+
+				if toUpdate.Annotations == nil {
+					toUpdate.Annotations = make(map[string]string)
+				}
+				toUpdate.Annotations["test-annotation"] = "updated-value"
+
+				updated, err := multinetworkClient.PodNetworkKinds().Update(ctx, toUpdate, metav1.UpdateOptions{})
 				if apierrors.IsConflict(err) {
 					return
 				}
-				g.Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid error, got: %v", err)
-				g.Expect(err.Error()).To(ContainSubstring("spec.DefaultPodNetworkKind is immutable"))
+				g.Expect(err).NotTo(HaveOccurred(), "failed to update metadata")
+				g.Expect(updated.Labels).To(HaveKeyWithValue("test-label", "updated-value"))
+				g.Expect(updated.Annotations).To(HaveKeyWithValue("test-annotation", "updated-value"))
 			}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 		})
 	})

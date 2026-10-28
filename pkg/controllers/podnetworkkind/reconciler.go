@@ -25,25 +25,18 @@ import (
 	v1alpha1networkkindlisters "github.com/kubernetes-sigs/multi-network-api/pkg/client/listers/apis/v1alpha1"
 	"github.com/kubernetes-sigs/multi-network-api/pkg/ruleswatcher"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	v1apiextensionsinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/ptr"
-	"k8s.io/utils/set"
-)
-
-const (
-	// groupKindCustomResourceDefinitionIndex is the lookup name for the index function
-	// which indexes by groupkind CustomResourceDefinition.
-	groupKindCustomResourceDefinitionIndex = "groupKind"
 )
 
 type PodNetworkKindReconciler struct {
 	customResourceDefinitionIndexer cache.Indexer
+	podNetworkKindIndexer           cache.Indexer
 	podNetworkKindLister            v1alpha1networkkindlisters.PodNetworkKindLister
 	podNetworkKindClient            v1alpha1client.PodNetworkKindInterface
 	ruleWatcher                     ruleswatcher.Interface
@@ -51,35 +44,21 @@ type PodNetworkKindReconciler struct {
 }
 
 func NewPodNetworkKindReconciler(
-	customResourceDefinitionInformer v1apiextensionsinformers.CustomResourceDefinitionInformer,
+	customResourceDefinitionIndexer cache.Indexer,
+	podNetworkKindIndexer cache.Indexer,
 	podNetworkKindLister v1alpha1networkkindlisters.PodNetworkKindLister,
 	podNetworkKindClient v1alpha1client.PodNetworkKindInterface,
 	ruleWatcher ruleswatcher.Interface,
 	clientset clientset.Interface,
-) (*PodNetworkKindReconciler, error) {
-	nkr := &PodNetworkKindReconciler{
-		customResourceDefinitionIndexer: customResourceDefinitionInformer.Informer().GetIndexer(),
+) *PodNetworkKindReconciler {
+	return &PodNetworkKindReconciler{
+		customResourceDefinitionIndexer: customResourceDefinitionIndexer,
+		podNetworkKindIndexer:           podNetworkKindIndexer,
 		podNetworkKindLister:            podNetworkKindLister,
 		podNetworkKindClient:            podNetworkKindClient,
 		ruleWatcher:                     ruleWatcher,
 		clientset:                       clientset,
 	}
-
-	err := nkr.customResourceDefinitionIndexer.AddIndexers(cache.Indexers{
-		groupKindCustomResourceDefinitionIndex: func(obj interface{}) ([]string, error) {
-			nk, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
-			if !ok {
-				return nil, nil
-			}
-
-			return []string{v1alpha1.GroupKind(nk.Spec.Group, nk.Spec.Names.Kind)}, nil
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to add indexer for PodNetworkKind: %w", err)
-	}
-
-	return nkr, nil
 }
 
 func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkKindName string) error {
@@ -92,29 +71,20 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 	}
 	oldNetworkKind := podNetworkKind.DeepCopy()
 
-	objs, err := pnkr.customResourceDefinitionIndexer.ByIndex(
-		groupKindCustomResourceDefinitionIndex,
-		v1alpha1.GroupKind(podNetworkKind.Spec.ImplementationType.Group, podNetworkKind.Spec.ImplementationType.Kind),
-	)
+	group := podNetworkKind.Spec.ImplementationType.Group
+	kind := podNetworkKind.Spec.ImplementationType.Kind
+
+	plural, found, err := pnkr.findResourceType(group, kind)
 	if err != nil {
-		return fmt.Errorf("failed to get CustomResourceDefinition: %w", err)
+		return fmt.Errorf("failed to find resource type: %w", err)
 	}
 
-	var crd *apiextensionsv1.CustomResourceDefinition
-	if len(objs) == 1 {
-		var ok bool
-		crd, ok = objs[0].(*apiextensionsv1.CustomResourceDefinition)
-		if !ok {
-			return fmt.Errorf("unexpected type for CustomResourceDefinition: %T", objs[0])
-		}
-	}
-
-	pnkr.setImplementationTypeReadyCondition(podNetworkKind, crd)
-
-	err = pnkr.setDefaultPodNetworkKind(podNetworkKind)
+	conflict, err := pnkr.hasTypeConflict(podNetworkKind)
 	if err != nil {
-		return fmt.Errorf("failed to set default pod network kind: %w", err)
+		return fmt.Errorf("failed to check for type conflict: %w", err)
 	}
+
+	pnkr.setImplementationTypeReadyCondition(podNetworkKind, group, plural, found, conflict)
 
 	if hasStatusChanged(oldNetworkKind, podNetworkKind) {
 		_, err := pnkr.podNetworkKindClient.UpdateStatus(ctx, podNetworkKind, metav1.UpdateOptions{})
@@ -126,45 +96,92 @@ func (pnkr *PodNetworkKindReconciler) Reconcile(ctx context.Context, podNetworkK
 	return nil
 }
 
-func (pnkr *PodNetworkKindReconciler) setImplementationTypeReadyCondition(podNetworkKind *v1alpha1.PodNetworkKind, crd *apiextensionsv1.CustomResourceDefinition) {
+func (pnkr *PodNetworkKindReconciler) findResourceType(group, kind string) (string, bool, error) {
+	objs, err := pnkr.customResourceDefinitionIndexer.ByIndex(
+		groupKindCustomResourceDefinitionIndex,
+		v1alpha1.GroupKind(group, kind),
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get CustomResourceDefinition: %w", err)
+	}
+
+	// In Kubernetes, apiextensions-apiserver enforces Group/Kind uniqueness across CRDs,
+	// so more than one CRD matching the same GroupKind should be impossible in practice.
+	if len(objs) > 1 {
+		return "", false, fmt.Errorf("multiple CustomResourceDefinitions found for GroupKind %s/%s", group, kind)
+	}
+
+	if len(objs) == 1 {
+		crd, ok := objs[0].(*apiextensionsv1.CustomResourceDefinition)
+		if !ok {
+			return "", false, fmt.Errorf("unexpected type for CustomResourceDefinition: %T", objs[0])
+		}
+		return crd.Spec.Names.Plural, true, nil
+	}
+
+	if pnkr.clientset != nil && pnkr.clientset.Discovery() != nil {
+		_, resourceLists, err := pnkr.clientset.Discovery().ServerGroupsAndResources()
+		if err != nil {
+			if !discovery.IsGroupDiscoveryFailedError(err) {
+				return "", false, fmt.Errorf("failed to discover server resources: %w", err)
+			}
+			if discoveryErr, ok := err.(*discovery.ErrGroupDiscoveryFailed); ok {
+				for gv, groupErr := range discoveryErr.Groups {
+					if gv.Group == group {
+						return "", false, fmt.Errorf("failed to discover resources for group %q: %w", group, groupErr)
+					}
+				}
+			}
+		}
+		for _, rl := range resourceLists {
+			gv, err := schema.ParseGroupVersion(rl.GroupVersion)
+			if err != nil {
+				continue
+			}
+			if gv.Group != group {
+				continue
+			}
+			for _, r := range rl.APIResources {
+				if r.Kind == kind {
+					return r.Name, true, nil
+				}
+			}
+		}
+	}
+
+	return "", false, nil
+}
+
+func (pnkr *PodNetworkKindReconciler) setImplementationTypeReadyCondition(podNetworkKind *v1alpha1.PodNetworkKind, group, plural string, found, conflict bool) {
 	condition := metav1.Condition{
-		Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-		Status:  metav1.ConditionTrue,
-		Message: "",
-		Reason:  v1alpha1.PodNetworkKindReasonCompliant,
+		Type:               v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: podNetworkKind.Generation,
+		Message:            "",
+		Reason:             v1alpha1.PodNetworkKindReasonCompliant,
 	}
 
-	if crd == nil {
+	if !found {
 		condition.Status = metav1.ConditionFalse
-		condition.Message = "CRD not found"
-		condition.Reason = v1alpha1.PodNetworkKindReasonCRDNotFound
+		condition.Message = "Resource Type not found"
+		condition.Reason = v1alpha1.PodNetworkKindReasonResourceTypeNotFound
 		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
 		return
 	}
 
-	ready, message := crdReady(crd)
-	if !ready {
-		condition.Status = metav1.ConditionFalse
-		condition.Message = message
-		condition.Reason = v1alpha1.PodNetworkKindReasonCRDNotReady
-		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
-		return
-	}
-
-	categoriesExisting, message := crdCategory(crd)
-	if !categoriesExisting {
-		condition.Status = metav1.ConditionFalse
-		condition.Message = message
-		condition.Reason = v1alpha1.PodNetworkKindReasonCRDMissingCategories
-		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
-		return
-	}
-
-	allowed := pnkr.hasPermissions(crd)
+	allowed := pnkr.hasPermissions(group, plural)
 	if !allowed {
 		condition.Status = metav1.ConditionFalse
-		condition.Message = "Insufficient permissions to access the Custom Resources"
+		condition.Message = "Insufficient permissions to access the Resources"
 		condition.Reason = v1alpha1.PodNetworkKindReasonMissingRBAC
+		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
+		return
+	}
+
+	if conflict {
+		condition.Status = metav1.ConditionFalse
+		condition.Message = "Another PodNetworkKind already references the same ImplementationType"
+		condition.Reason = v1alpha1.PodNetworkKindReasonTypeConflict
 		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
 		return
 	}
@@ -172,143 +189,34 @@ func (pnkr *PodNetworkKindReconciler) setImplementationTypeReadyCondition(podNet
 	meta.SetStatusCondition(&podNetworkKind.Status.Conditions, condition)
 }
 
-func (pnkr *PodNetworkKindReconciler) setDefaultPodNetworkKind(podNetworkKind *v1alpha1.PodNetworkKind) error {
-	if podNetworkKind.Spec.DefaultPodNetworkKind == nil || !*podNetworkKind.Spec.DefaultPodNetworkKind {
-		podNetworkKind.Status.DefaultPodNetworkKind = nil
-		meta.RemoveStatusCondition(&podNetworkKind.Status.Conditions, v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind)
-		return nil
-	}
-
-	allKinds, err := pnkr.podNetworkKindLister.List(labels.Everything())
+func (pnkr *PodNetworkKindReconciler) hasTypeConflict(podNetworkKind *v1alpha1.PodNetworkKind) (bool, error) {
+	objs, err := pnkr.podNetworkKindIndexer.ByIndex(
+		implementationTypePodNetworkKindIndex,
+		v1alpha1.GroupKind(podNetworkKind.Spec.ImplementationType.Group, podNetworkKind.Spec.ImplementationType.Kind),
+	)
 	if err != nil {
-		return fmt.Errorf("failed to list PodNetworkKinds: %w", err)
+		return false, fmt.Errorf("failed to get PodNetworkKinds by implementationType: %w", err)
 	}
 
-	var candidates []*v1alpha1.PodNetworkKind
-	foundCurrent := false
-	for _, k := range allKinds {
-		if k.Spec.DefaultPodNetworkKind != nil && *k.Spec.DefaultPodNetworkKind {
-			if k.Name == podNetworkKind.Name {
-				candidates = append(candidates, podNetworkKind)
-				foundCurrent = true
-			} else {
-				candidates = append(candidates, k)
-			}
+	for _, obj := range objs {
+		other, ok := obj.(*v1alpha1.PodNetworkKind)
+		if !ok {
+			continue
 		}
-	}
-	if !foundCurrent {
-		candidates = append(candidates, podNetworkKind)
-	}
-
-	best := selectDefaultPodNetworkKind(candidates)
-	if best != nil && best.Name == podNetworkKind.Name {
-		podNetworkKind.Status.DefaultPodNetworkKind = ptr.To(true)
-		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, metav1.Condition{
-			Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-			Status:  metav1.ConditionTrue,
-			Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
-			Message: "",
-		})
-	} else {
-		podNetworkKind.Status.DefaultPodNetworkKind = ptr.To(false)
-		meta.SetStatusCondition(&podNetworkKind.Status.Conditions, metav1.Condition{
-			Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-			Status:  metav1.ConditionFalse,
-			Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindAlreadySet,
-			Message: "Another PodNetworkKind is already set as default",
-		})
-	}
-
-	return nil
-}
-
-func selectDefaultPodNetworkKind(candidates []*v1alpha1.PodNetworkKind) *v1alpha1.PodNetworkKind {
-	if len(candidates) == 0 {
-		return nil
-	}
-
-	best := candidates[0]
-	for _, c := range candidates[1:] {
-		if isOlderOrFirstAlphabetically(c, best) {
-			best = c
+		if other.Name == podNetworkKind.Name {
+			continue
 		}
-	}
-	return best
-}
 
-func isOlderOrFirstAlphabetically(a, b *v1alpha1.PodNetworkKind) bool {
-	if a.CreationTimestamp.Before(&b.CreationTimestamp) {
-		return true
-	}
-	if b.CreationTimestamp.Before(&a.CreationTimestamp) {
-		return false
-	}
-	return a.Name < b.Name
-}
-
-// crdCategory checks if the CRD has all the mandatory categories.
-// It returns a boolean indicating if the CRD is compliant and a message describing any missing categories.
-func crdCategory(crd *apiextensionsv1.CustomResourceDefinition) (bool, string) {
-	crdCategories := set.New(crd.Spec.Names.Categories...)
-	for _, category := range v1alpha1.Categories {
-		if !crdCategories.Has(category) {
-			return false, fmt.Sprintf("CRD is missing mandatory category %s", category)
+		if other.CreationTimestamp.Before(&podNetworkKind.CreationTimestamp) ||
+			other.CreationTimestamp.Equal(&podNetworkKind.CreationTimestamp) {
+			return true, nil
 		}
 	}
 
-	return true, ""
-}
-
-// crdReady checks if the CRD is established and its names are accepted.
-// It returns a boolean indicating if the CRD is ready and a message describing any issues.
-func crdReady(crd *apiextensionsv1.CustomResourceDefinition) (bool, string) {
-	// conditionTypes keeps track of the CRD conditions that need to be satisfied.
-	conditionTypes := set.New(apiextensionsv1.Established, apiextensionsv1.NamesAccepted)
-
-	for _, condition := range crd.Status.Conditions {
-		switch condition.Type {
-		case apiextensionsv1.Established:
-			if condition.Status != apiextensionsv1.ConditionTrue {
-				return false, "CRD is not established"
-			}
-			conditionTypes.Delete(apiextensionsv1.Established)
-		case apiextensionsv1.NamesAccepted:
-			if condition.Status != apiextensionsv1.ConditionTrue {
-				return false, "CRD names are not accepted"
-			}
-			conditionTypes.Delete(apiextensionsv1.NamesAccepted)
-		case apiextensionsv1.NonStructuralSchema:
-			if condition.Status != apiextensionsv1.ConditionTrue {
-				return false, "CRD has a structural schema issue"
-			}
-		case apiextensionsv1.Terminating:
-			if condition.Status != apiextensionsv1.ConditionTrue {
-				return false, "CRD is terminating"
-			}
-		case apiextensionsv1.KubernetesAPIApprovalPolicyConformant:
-			if condition.Status != apiextensionsv1.ConditionFalse {
-				return false, "CRD is not conformant with the Kubernetes API approval policy"
-			}
-		}
-	}
-
-	if conditionTypes.Len() > 0 {
-		return false, fmt.Sprintf("CRD is missing conditions: %v", conditionTypes.UnsortedList())
-	}
-
-	return true, ""
+	return false, nil
 }
 
 func hasStatusChanged(oldPodNetworkKind *v1alpha1.PodNetworkKind, newPodNetworkKind *v1alpha1.PodNetworkKind) bool {
-	if (oldPodNetworkKind.Status.DefaultPodNetworkKind == nil) != (newPodNetworkKind.Status.DefaultPodNetworkKind == nil) {
-		return true
-	}
-	if oldPodNetworkKind.Status.DefaultPodNetworkKind != nil && newPodNetworkKind.Status.DefaultPodNetworkKind != nil {
-		if *oldPodNetworkKind.Status.DefaultPodNetworkKind != *newPodNetworkKind.Status.DefaultPodNetworkKind {
-			return true
-		}
-	}
-
 	if len(oldPodNetworkKind.Status.Conditions) != len(newPodNetworkKind.Status.Conditions) {
 		return true
 	}
@@ -334,6 +242,6 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 	return nil
 }
 
-func (pnkr *PodNetworkKindReconciler) hasPermissions(crd *apiextensionsv1.CustomResourceDefinition) bool {
-	return pnkr.ruleWatcher.HasPermission("list", crd.Spec.Group, crd.Spec.Names.Plural)
+func (pnkr *PodNetworkKindReconciler) hasPermissions(group, plural string) bool {
+	return pnkr.ruleWatcher.HasPermission("list", group, plural)
 }

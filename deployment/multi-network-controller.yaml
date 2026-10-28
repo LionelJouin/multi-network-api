@@ -17,12 +17,6 @@ kind: ClusterRole
 metadata:
   name: multi-network-controller-cluster-role
 rules:
-- apiGroups: ["resource.k8s.io"]
-  resources: ["resourceslices", "resourceclaims"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["get", "list", "watch"]
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]
   verbs: ["get", "list", "watch"]
@@ -32,12 +26,9 @@ rules:
 - apiGroups: ["multinetwork.networking.x-k8s.io"]
   resources: ["podnetworkkinds/status"]
   verbs: ["update", "patch"]
-- apiGroups: [""]
-  resources: ["pods", "services"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["discovery.k8s.io"]
-  resources: ["endpointslices"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["selfsubjectrulesreviews"]
+  verbs: ["create"]
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -77,7 +68,13 @@ spec:
       containers:
       - name: multi-network-controller
         image: localhost:5000/multi-network-api/multi-network-controller:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
         command:
         - ./multi-network-controller
         args:

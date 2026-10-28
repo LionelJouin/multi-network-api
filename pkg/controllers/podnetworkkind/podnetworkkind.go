@@ -52,7 +52,8 @@ type PodNetworkKindController struct {
 	podNetworkKindSynced           cache.InformerSynced
 	ruleWatcherSynced              cache.InformerSynced
 
-	podNetworkKindLister v1alpha1networkkindlisters.PodNetworkKindLister
+	podNetworkKindIndexer cache.Indexer
+	podNetworkKindLister  v1alpha1networkkindlisters.PodNetworkKindLister
 
 	podNetworkKindQueue workqueue.TypedRateLimitingInterface[string]
 
@@ -71,6 +72,7 @@ func NewPodNetworkKindController(
 		customResourceDefinitionSynced: customResourceDefinitionInformer.Informer().HasSynced,
 		podNetworkKindSynced:           podNetworkKindInformer.Informer().HasSynced,
 		ruleWatcherSynced:              ruleWatcher.HasSynced,
+		podNetworkKindIndexer:          podNetworkKindInformer.Informer().GetIndexer(),
 		podNetworkKindLister:           podNetworkKindInformer.Lister(),
 		podNetworkKindQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
@@ -78,17 +80,24 @@ func NewPodNetworkKindController(
 		),
 	}
 
-	var err error
-	nkc.podNetworkKindReconciler, err = NewPodNetworkKindReconciler(
-		customResourceDefinitionInformer,
-		podNetworkKindInformer.Lister(),
+	err := AddCustomResourceDefinitionIndexers(customResourceDefinitionInformer.Informer().GetIndexer())
+	if err != nil {
+		return nil, fmt.Errorf("failed to add indexers for CustomResourceDefinition: %w", err)
+	}
+
+	err = AddPodNetworkKindIndexers(nkc.podNetworkKindIndexer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add indexers for PodNetworkKind: %w", err)
+	}
+
+	nkc.podNetworkKindReconciler = NewPodNetworkKindReconciler(
+		customResourceDefinitionInformer.Informer().GetIndexer(),
+		nkc.podNetworkKindIndexer,
+		nkc.podNetworkKindLister,
 		networkKindClient,
 		ruleWatcher,
 		client,
 	)
-	if err != nil {
-		return nil, err
-	}
 
 	if _, err := podNetworkKindInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    nkc.onPodNetworkKindEvent,
@@ -116,24 +125,12 @@ func NewPodNetworkKindController(
 func (pnkc *PodNetworkKindController) onPodNetworkKindEvent(obj interface{}) {
 	pnkc.enqueuePodNetworkKind(obj)
 
-	pnk, ok := obj.(*v1alpha1.PodNetworkKind)
-	if ok && pnk.Spec.DefaultPodNetworkKind != nil && *pnk.Spec.DefaultPodNetworkKind {
-		pnkc.enqueueAllDefaultCandidates()
-	}
-}
-
-func (pnkc *PodNetworkKindController) enqueueAllDefaultCandidates() {
-	networkKinds, err := pnkc.podNetworkKindLister.List(labels.Everything())
-	if err != nil {
-		klog.Error(err, "Failed to list PodNetworkKinds")
+	networkKind, ok := extractPodNetworkKind(obj)
+	if !ok {
 		return
 	}
 
-	for _, nk := range networkKinds {
-		if nk.Spec.DefaultPodNetworkKind != nil && *nk.Spec.DefaultPodNetworkKind {
-			pnkc.podNetworkKindQueue.Add(nk.Name)
-		}
-	}
+	pnkc.enqueuePodNetworkKindsForGroupKind(networkKind.Spec.ImplementationType.Group, networkKind.Spec.ImplementationType.Kind)
 }
 
 func (pnkc *PodNetworkKindController) enqueueAllPodNetworkKinds() {
@@ -148,20 +145,26 @@ func (pnkc *PodNetworkKindController) enqueueAllPodNetworkKinds() {
 	}
 }
 
-func (pnkc *PodNetworkKindController) enqueuePodNetworkKind(obj interface{}) {
-	var networkKind *v1alpha1.PodNetworkKind
+func extractPodNetworkKind(obj interface{}) (*v1alpha1.PodNetworkKind, bool) {
 	switch t := obj.(type) {
 	case *v1alpha1.PodNetworkKind:
-		networkKind = t
+		return t, true
 	case cache.DeletedFinalStateUnknown:
-		var ok bool
-		networkKind, ok = t.Obj.(*v1alpha1.PodNetworkKind)
+		pnk, ok := t.Obj.(*v1alpha1.PodNetworkKind)
 		if !ok {
 			klog.Error(nil, "Expected PodNetworkKind in tombstone", "actual", fmt.Sprintf("%T", t.Obj))
-			return
+			return nil, false
 		}
+		return pnk, true
 	default:
 		klog.Error(nil, "Expected PodNetworkKind", "actual", fmt.Sprintf("%T", obj))
+		return nil, false
+	}
+}
+
+func (pnkc *PodNetworkKindController) enqueuePodNetworkKind(obj interface{}) {
+	networkKind, ok := extractPodNetworkKind(obj)
+	if !ok {
 		return
 	}
 
@@ -174,24 +177,46 @@ func (pnkc *PodNetworkKindController) onCustomResourceDefinitionEvent(oldObj, ne
 			continue
 		}
 
-		var crd *apiextensionsv1.CustomResourceDefinition
-		switch t := obj.(type) {
-		case *apiextensionsv1.CustomResourceDefinition:
-			crd = t
-		case cache.DeletedFinalStateUnknown:
-			var ok bool
-			crd, ok = t.Obj.(*apiextensionsv1.CustomResourceDefinition)
-			if !ok {
-				klog.Error(nil, "Expected CustomResourceDefinition in tombstone", "actual", fmt.Sprintf("%T", t.Obj))
-				return
-			}
-		default:
-			klog.Error(nil, "Expected CustomResourceDefinition", "actual", fmt.Sprintf("%T", obj))
-			return
+		crd, ok := extractCRD(obj)
+		if !ok {
+			continue
 		}
 
-		name := v1alpha1.GetPodNetworkKindName(crd.Spec.Group, crd.Spec.Names.Kind)
-		pnkc.podNetworkKindQueue.Add(name)
+		pnkc.enqueuePodNetworkKindsForGroupKind(crd.Spec.Group, crd.Spec.Names.Kind)
+	}
+}
+
+func extractCRD(obj interface{}) (*apiextensionsv1.CustomResourceDefinition, bool) {
+	switch t := obj.(type) {
+	case *apiextensionsv1.CustomResourceDefinition:
+		return t, true
+	case cache.DeletedFinalStateUnknown:
+		crd, ok := t.Obj.(*apiextensionsv1.CustomResourceDefinition)
+		if !ok {
+			klog.Error(nil, "Expected CustomResourceDefinition in tombstone", "actual", fmt.Sprintf("%T", t.Obj))
+			return nil, false
+		}
+		return crd, true
+	default:
+		klog.Error(nil, "Expected CustomResourceDefinition", "actual", fmt.Sprintf("%T", obj))
+		return nil, false
+	}
+}
+
+func (pnkc *PodNetworkKindController) enqueuePodNetworkKindsForGroupKind(group, kind string) {
+	objs, err := pnkc.podNetworkKindIndexer.ByIndex(
+		implementationTypePodNetworkKindIndex,
+		v1alpha1.GroupKind(group, kind),
+	)
+	if err != nil {
+		klog.Error(err, "Failed to get PodNetworkKinds by implementationType", "group", group, "kind", kind)
+		return
+	}
+
+	for _, obj := range objs {
+		if nk, ok := obj.(*v1alpha1.PodNetworkKind); ok {
+			pnkc.podNetworkKindQueue.Add(nk.Name)
+		}
 	}
 }
 

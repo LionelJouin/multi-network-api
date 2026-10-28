@@ -19,6 +19,6 @@ package v1alpha1
 // Well-known finalizers for PodNetworkKinds.
 const (
 	// PodNetworkKindFinalizer is attached to a PodNetworkKind to prevent deletion
-	// while pod network objects referencing it still exist in the cluster.
+	// while pod network objects belonging to it still exist in the cluster.
 	PodNetworkKindFinalizer = "multinetwork.networking.x-k8s.io/pod-network-kind-protection"
 )

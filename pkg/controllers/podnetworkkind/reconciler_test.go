@@ -37,7 +37,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/ptr"
 )
 
 func newReconciler(
@@ -55,16 +54,24 @@ func newReconciler(
 
 	ruleWatcher := ruleswatcher.New(fakeKubeClient)
 
-	reconciler, err := NewPodNetworkKindReconciler(
-		apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
+	crdIndexer := apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Informer().GetIndexer()
+	pnkIndexer := networkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds().Informer().GetIndexer()
+
+	if err := AddCustomResourceDefinitionIndexers(crdIndexer); err != nil {
+		t.Fatal("failed to add CRD indexers:", err)
+	}
+	if err := AddPodNetworkKindIndexers(pnkIndexer); err != nil {
+		t.Fatal("failed to add PodNetworkKind indexers:", err)
+	}
+
+	reconciler := NewPodNetworkKindReconciler(
+		crdIndexer,
+		pnkIndexer,
 		networkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds().Lister(),
 		fakeMultiNetworkClient.MultinetworkV1alpha1().PodNetworkKinds(),
 		ruleWatcher,
 		fakeKubeClient,
 	)
-	if err != nil {
-		t.Fatal("NewPodNetworkKindReconciler failed:", err)
-	}
 
 	networkKindInformerFactory.Start(ctx.Done())
 	apiextensionsInformerFactory.Start(ctx.Done())
@@ -92,7 +99,7 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 				Names: apiextensionsv1.CustomResourceDefinitionNames{
 					Kind:       "MyNetwork",
 					Plural:     "mynetworks",
-					Categories: []string{"podnetwork", "podnetworks"},
+					Categories: v1alpha1.Categories,
 				},
 			},
 			Status: apiextensionsv1.CustomResourceDefinitionStatus{
@@ -136,7 +143,7 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 			podNetworkKindName: "nonexistent",
 		},
 		{
-			name:                         "CRD not found",
+			name:                         "Resource Type not found",
 			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
 			podNetworkKindName:           "example-com-mynetwork",
 			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
@@ -144,165 +151,61 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 				nk.Status.Conditions = []metav1.Condition{{
 					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
 					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotFound,
-					Message: "CRD not found",
+					Reason:  v1alpha1.PodNetworkKindReasonResourceTypeNotFound,
+					Message: "Resource Type not found",
 				}}
 				return nk
 			}(),
 		},
 		{
-			name:                         "CRD not established",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Status.Conditions = []apiextensionsv1.CustomResourceDefinitionCondition{
-					{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionFalse},
-					{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
+			name: "native resource type found and compliant",
+			initialPodNetworkKindObjects: []runtime.Object{
+				&v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "native-net"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						ImplementationType: metav1.GroupKind{Group: "", Kind: "Pod"},
+					},
+				},
+			},
+			fakeKubeClientSetup: func(fakeKubeClient *fake.Clientset) {
+				fakeKubeClient.Resources = []*metav1.APIResourceList{
+					{
+						GroupVersion: "v1",
+						APIResources: []metav1.APIResource{
+							{
+								Name: "pods",
+								Kind: "Pod",
+							},
+						},
+					},
 				}
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
+				fakeKubeClient.PrependReactor("create", "selfsubjectrulesreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					return true, &authv1.SelfSubjectRulesReview{
+						Status: authv1.SubjectRulesReviewStatus{
+							ResourceRules: []authv1.ResourceRule{
+								{
+									Verbs:     []string{"list"},
+									APIGroups: []string{""},
+									Resources: []string{"pods"},
+								},
+							},
+						},
+					}, nil
+				})
+			},
+			podNetworkKindName: "native-net",
 			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Status.Conditions = []metav1.Condition{{
-					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotReady,
-					Message: "CRD is not established",
-				}}
-				return nk
-			}(),
-		},
-		{
-			name:                         "CRD names not accepted",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Status.Conditions = []apiextensionsv1.CustomResourceDefinitionCondition{
-					{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
-					{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionFalse},
+				nk := &v1alpha1.PodNetworkKind{
+					ObjectMeta: metav1.ObjectMeta{Name: "native-net"},
+					Spec: v1alpha1.PodNetworkKindSpec{
+						ImplementationType: metav1.GroupKind{Group: "", Kind: "Pod"},
+					},
 				}
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
 				nk.Status.Conditions = []metav1.Condition{{
 					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotReady,
-					Message: "CRD names are not accepted",
-				}}
-				return nk
-			}(),
-		},
-		{
-			name:                         "CRD missing Established condition",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Status.Conditions = []apiextensionsv1.CustomResourceDefinitionCondition{
-					{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
-				}
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Status.Conditions = []metav1.Condition{{
-					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotReady,
-					Message: "CRD is missing conditions: [Established]",
-				}}
-				return nk
-			}(),
-		},
-		{
-			name:                         "CRD has structural schema issue",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Status.Conditions = append(crd.Status.Conditions, apiextensionsv1.CustomResourceDefinitionCondition{
-					Type:   apiextensionsv1.NonStructuralSchema,
-					Status: apiextensionsv1.ConditionFalse,
-				})
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Status.Conditions = []metav1.Condition{{
-					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotReady,
-					Message: "CRD has a structural schema issue",
-				}}
-				return nk
-			}(),
-		},
-		{
-			name:                         "CRD is terminating",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Status.Conditions = append(crd.Status.Conditions, apiextensionsv1.CustomResourceDefinitionCondition{
-					Type:   apiextensionsv1.Terminating,
-					Status: apiextensionsv1.ConditionFalse,
-				})
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Status.Conditions = []metav1.Condition{{
-					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotReady,
-					Message: "CRD is terminating",
-				}}
-				return nk
-			}(),
-		},
-		{
-			name:                         "CRD not conformant with API approval policy",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Status.Conditions = append(crd.Status.Conditions, apiextensionsv1.CustomResourceDefinitionCondition{
-					Type:   apiextensionsv1.KubernetesAPIApprovalPolicyConformant,
-					Status: apiextensionsv1.ConditionTrue,
-				})
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Status.Conditions = []metav1.Condition{{
-					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDNotReady,
-					Message: "CRD is not conformant with the Kubernetes API approval policy",
-				}}
-				return nk
-			}(),
-		},
-		{
-			name:                         "CRD missing mandatory categories",
-			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
-			initialCRDObjects: []runtime.Object{func() *apiextensionsv1.CustomResourceDefinition {
-				crd := readyCRD()
-				crd.Spec.Names.Categories = nil
-				return crd
-			}()},
-			podNetworkKindName: "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Status.Conditions = []metav1.Condition{{
-					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-					Status:  metav1.ConditionFalse,
-					Reason:  v1alpha1.PodNetworkKindReasonCRDMissingCategories,
-					Message: "CRD is missing mandatory category podnetwork",
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.PodNetworkKindReasonCompliant,
+					Message: "",
 				}}
 				return nk
 			}(),
@@ -318,7 +221,7 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
 					Status:  metav1.ConditionFalse,
 					Reason:  v1alpha1.PodNetworkKindReasonMissingRBAC,
-					Message: "Insufficient permissions to access the Custom Resources",
+					Message: "Insufficient permissions to access the Resources",
 				}}
 				return nk
 			}(),
@@ -341,121 +244,98 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 			}(),
 		},
 		{
-			name: "default PodNetworkKind selected when requested and sole candidate",
-			initialPodNetworkKindObjects: []runtime.Object{func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
-				return nk
-			}()},
-			initialCRDObjects:   []runtime.Object{readyCRD()},
-			fakeKubeClientSetup: allowRules,
-			podNetworkKindName:  "example-com-mynetwork",
-			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
-				nk := podNetworkKindObj()
-				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
-				nk.Status.DefaultPodNetworkKind = ptr.To(true)
-				nk.Status.Conditions = []metav1.Condition{
-					{
-						Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-						Status:  metav1.ConditionTrue,
-						Reason:  v1alpha1.PodNetworkKindReasonCompliant,
-						Message: "",
-					},
-					{
-						Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-						Status:  metav1.ConditionTrue,
-						Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
-						Message: "",
-					},
-				}
-				return nk
-			}(),
-		},
-		{
-			name: "default PodNetworkKind already set by older candidate",
+			name: "type conflict on newer PodNetworkKind",
 			initialPodNetworkKindObjects: []runtime.Object{
 				func() *v1alpha1.PodNetworkKind {
 					nk := podNetworkKindObj()
-					nk.Name = "older-candidate"
+					nk.Name = "older-pnk"
 					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
 					return nk
 				}(),
 				func() *v1alpha1.PodNetworkKind {
 					nk := podNetworkKindObj()
-					nk.Name = "younger-candidate"
+					nk.Name = "newer-pnk"
 					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}
-					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
 					return nk
 				}(),
 			},
 			initialCRDObjects:   []runtime.Object{readyCRD()},
 			fakeKubeClientSetup: allowRules,
-			podNetworkKindName:  "younger-candidate",
+			podNetworkKindName:  "newer-pnk",
 			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
 				nk := podNetworkKindObj()
-				nk.Name = "younger-candidate"
+				nk.Name = "newer-pnk"
 				nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}
-				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
-				nk.Status.DefaultPodNetworkKind = ptr.To(false)
-				nk.Status.Conditions = []metav1.Condition{
-					{
-						Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-						Status:  metav1.ConditionTrue,
-						Reason:  v1alpha1.PodNetworkKindReasonCompliant,
-						Message: "",
-					},
-					{
-						Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-						Status:  metav1.ConditionFalse,
-						Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindAlreadySet,
-						Message: "Another PodNetworkKind is already set as default",
-					},
-				}
+				nk.Status.Conditions = []metav1.Condition{{
+					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  v1alpha1.PodNetworkKindReasonTypeConflict,
+					Message: "Another PodNetworkKind already references the same ImplementationType",
+				}}
 				return nk
 			}(),
 		},
 		{
-			name: "default PodNetworkKind tie-breaker by name when timestamps equal",
+			name: "strictly older PodNetworkKind remains compliant when newer conflict exists",
 			initialPodNetworkKindObjects: []runtime.Object{
 				func() *v1alpha1.PodNetworkKind {
 					nk := podNetworkKindObj()
-					nk.Name = "alpha-candidate"
+					nk.Name = "older-pnk"
 					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
 					return nk
 				}(),
 				func() *v1alpha1.PodNetworkKind {
 					nk := podNetworkKindObj()
-					nk.Name = "beta-candidate"
-					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-					nk.Spec.DefaultPodNetworkKind = ptr.To(true)
+					nk.Name = "newer-pnk"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)}
 					return nk
 				}(),
 			},
 			initialCRDObjects:   []runtime.Object{readyCRD()},
 			fakeKubeClientSetup: allowRules,
-			podNetworkKindName:  "alpha-candidate",
+			podNetworkKindName:  "older-pnk",
 			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
 				nk := podNetworkKindObj()
-				nk.Name = "alpha-candidate"
+				nk.Name = "older-pnk"
 				nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-				nk.Spec.DefaultPodNetworkKind = ptr.To(true)
-				nk.Status.DefaultPodNetworkKind = ptr.To(true)
-				nk.Status.Conditions = []metav1.Condition{
-					{
-						Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
-						Status:  metav1.ConditionTrue,
-						Reason:  v1alpha1.PodNetworkKindReasonCompliant,
-						Message: "",
-					},
-					{
-						Type:    v1alpha1.PodNetworkKindConditionDefaultPodNetworkKind,
-						Status:  metav1.ConditionTrue,
-						Reason:  v1alpha1.PodNetworkKindReasonDefaultPodNetworkKindSet,
-						Message: "",
-					},
-				}
+				nk.Status.Conditions = []metav1.Condition{{
+					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.PodNetworkKindReasonCompliant,
+					Message: "",
+				}}
+				return nk
+			}(),
+		},
+		{
+			name: "type conflict on both PodNetworkKinds with identical creationTimestamp",
+			initialPodNetworkKindObjects: []runtime.Object{
+				func() *v1alpha1.PodNetworkKind {
+					nk := podNetworkKindObj()
+					nk.Name = "pnk-a"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+					return nk
+				}(),
+				func() *v1alpha1.PodNetworkKind {
+					nk := podNetworkKindObj()
+					nk.Name = "pnk-b"
+					nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+					return nk
+				}(),
+			},
+			initialCRDObjects:   []runtime.Object{readyCRD()},
+			fakeKubeClientSetup: allowRules,
+			podNetworkKindName:  "pnk-a",
+			expectedPodNetworkKind: func() *v1alpha1.PodNetworkKind {
+				nk := podNetworkKindObj()
+				nk.Name = "pnk-a"
+				nk.CreationTimestamp = metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+				nk.Status.Conditions = []metav1.Condition{{
+					Type:    v1alpha1.PodNetworkKindConditionImplementationTypeReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  v1alpha1.PodNetworkKindReasonTypeConflict,
+					Message: "Another PodNetworkKind already references the same ImplementationType",
+				}}
 				return nk
 			}(),
 		},
@@ -525,6 +405,17 @@ func TestPodNetworkKindReconciler_Reconcile(t *testing.T) {
 			podNetworkKindName: "example-com-mynetwork",
 			wantErr:            true,
 		},
+		{
+			name:                         "discovery error returns error",
+			initialPodNetworkKindObjects: []runtime.Object{podNetworkKindObj()},
+			fakeKubeClientSetup: func(fakeKubeClient *fake.Clientset) {
+				fakeKubeClient.PrependReactor("get", "resource", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, fmt.Errorf("discovery connection refused")
+				})
+			},
+			podNetworkKindName: "example-com-mynetwork",
+			wantErr:            true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -574,52 +465,16 @@ func TestNewPodNetworkKindReconciler(t *testing.T) {
 		apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(fakeApiExtensionsClient, 0)
 
 		ruleWatcher := ruleswatcher.New(fakeKubeClient)
-		reconciler, err := NewPodNetworkKindReconciler(
-			apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
+		reconciler := NewPodNetworkKindReconciler(
+			apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Informer().GetIndexer(),
+			podNetworkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds().Informer().GetIndexer(),
 			podNetworkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds().Lister(),
 			fakeMultiNetworkClient.MultinetworkV1alpha1().PodNetworkKinds(),
 			ruleWatcher,
 			fakeKubeClient,
 		)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
 		if reconciler == nil {
 			t.Fatal("expected reconciler to be non-nil")
-		}
-	})
-
-	t.Run("indexer failure when indexer already registered", func(t *testing.T) {
-		fakeKubeClient := fake.NewSimpleClientset()
-		fakeMultiNetworkClient := podNetworkKindFake.NewSimpleClientset()
-		fakeApiExtensionsClient := apiextensionsFake.NewSimpleClientset()
-
-		podNetworkKindInformerFactory := podNetworkKindInformers.NewSharedInformerFactory(fakeMultiNetworkClient, 0)
-		apiextensionsInformerFactory := apiextensionsinformers.NewSharedInformerFactory(fakeApiExtensionsClient, 0)
-
-		crdInformer := apiextensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions()
-		err := crdInformer.Informer().GetIndexer().AddIndexers(cache.Indexers{
-			groupKindCustomResourceDefinitionIndex: func(obj interface{}) ([]string, error) {
-				return nil, nil
-			},
-		})
-		if err != nil {
-			t.Fatalf("failed to add indexer: %v", err)
-		}
-
-		ruleWatcher := ruleswatcher.New(fakeKubeClient)
-		reconciler, err := NewPodNetworkKindReconciler(
-			crdInformer,
-			podNetworkKindInformerFactory.Multinetwork().V1alpha1().PodNetworkKinds().Lister(),
-			fakeMultiNetworkClient.MultinetworkV1alpha1().PodNetworkKinds(),
-			ruleWatcher,
-			fakeKubeClient,
-		)
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if reconciler != nil {
-			t.Fatal("expected reconciler to be nil on error")
 		}
 	})
 
@@ -660,166 +515,6 @@ func TestNewPodNetworkKindReconciler(t *testing.T) {
 			t.Errorf("expected keys [%q], got %v", expectedKey, keys)
 		}
 	})
-}
-
-func TestCrdCategory(t *testing.T) {
-	tests := []struct {
-		name        string
-		categories  []string
-		wantOk      bool
-		wantMessage string
-	}{
-		{
-			name:        "all required categories present",
-			categories:  []string{"podnetwork", "podnetworks"},
-			wantOk:      true,
-			wantMessage: "",
-		},
-		{
-			name:        "all required plus extra categories",
-			categories:  []string{"all", "podnetwork", "podnetworks", "custom"},
-			wantOk:      true,
-			wantMessage: "",
-		},
-		{
-			name:        "missing podnetworks",
-			categories:  []string{"podnetwork"},
-			wantOk:      false,
-			wantMessage: "CRD is missing mandatory category podnetworks",
-		},
-		{
-			name:        "missing podnetwork",
-			categories:  []string{"podnetworks"},
-			wantOk:      false,
-			wantMessage: "CRD is missing mandatory category podnetwork",
-		},
-		{
-			name:        "nil categories",
-			categories:  nil,
-			wantOk:      false,
-			wantMessage: "CRD is missing mandatory category podnetwork",
-		},
-		{
-			name:        "empty categories",
-			categories:  []string{},
-			wantOk:      false,
-			wantMessage: "CRD is missing mandatory category podnetwork",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			crd := &apiextensionsv1.CustomResourceDefinition{
-				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-					Names: apiextensionsv1.CustomResourceDefinitionNames{
-						Categories: tt.categories,
-					},
-				},
-			}
-			ok, msg := crdCategory(crd)
-			if ok != tt.wantOk {
-				t.Errorf("crdCategory() ok = %v, wantOk %v", ok, tt.wantOk)
-			}
-			if msg != tt.wantMessage {
-				t.Errorf("crdCategory() message = %q, wantMessage %q", msg, tt.wantMessage)
-			}
-		})
-	}
-}
-
-func TestCrdReady(t *testing.T) {
-	readyConditions := []apiextensionsv1.CustomResourceDefinitionCondition{
-		{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
-		{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
-	}
-
-	tests := []struct {
-		name        string
-		conditions  []apiextensionsv1.CustomResourceDefinitionCondition
-		wantOk      bool
-		wantMessage string
-	}{
-		{
-			name:        "ready with Established and NamesAccepted true",
-			conditions:  readyConditions,
-			wantOk:      true,
-			wantMessage: "",
-		},
-		{
-			name: "Established condition false",
-			conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
-				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionFalse},
-				{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
-			},
-			wantOk:      false,
-			wantMessage: "CRD is not established",
-		},
-		{
-			name: "NamesAccepted condition false",
-			conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
-				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionFalse},
-			},
-			wantOk:      false,
-			wantMessage: "CRD names are not accepted",
-		},
-		{
-			name: "NonStructuralSchema condition not true",
-			conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
-				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.NonStructuralSchema, Status: apiextensionsv1.ConditionFalse},
-			},
-			wantOk:      false,
-			wantMessage: "CRD has a structural schema issue",
-		},
-		{
-			name: "Terminating condition not true",
-			conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
-				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.Terminating, Status: apiextensionsv1.ConditionFalse},
-			},
-			wantOk:      false,
-			wantMessage: "CRD is terminating",
-		},
-		{
-			name: "KubernetesAPIApprovalPolicyConformant not false",
-			conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
-				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.NamesAccepted, Status: apiextensionsv1.ConditionTrue},
-				{Type: apiextensionsv1.KubernetesAPIApprovalPolicyConformant, Status: apiextensionsv1.ConditionTrue},
-			},
-			wantOk:      false,
-			wantMessage: "CRD is not conformant with the Kubernetes API approval policy",
-		},
-		{
-			name:        "missing Established and NamesAccepted conditions",
-			conditions:  []apiextensionsv1.CustomResourceDefinitionCondition{},
-			wantOk:      false,
-			wantMessage: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			crd := &apiextensionsv1.CustomResourceDefinition{
-				Status: apiextensionsv1.CustomResourceDefinitionStatus{
-					Conditions: tt.conditions,
-				},
-			}
-			ok, msg := crdReady(crd)
-			if ok != tt.wantOk {
-				t.Errorf("crdReady() ok = %v, wantOk %v", ok, tt.wantOk)
-			}
-			if tt.wantMessage != "" && msg != tt.wantMessage {
-				t.Errorf("crdReady() message = %q, wantMessage %q", msg, tt.wantMessage)
-			}
-			if !tt.wantOk && tt.wantMessage == "" && len(msg) == 0 {
-				t.Errorf("crdReady() expected non-empty message on failure")
-			}
-		})
-	}
 }
 
 func TestHasStatusChanged(t *testing.T) {
@@ -922,46 +617,6 @@ func TestHasStatusChanged(t *testing.T) {
 				},
 			},
 			expected: true,
-		},
-		{
-			name: "different DefaultPodNetworkKind nil vs true",
-			oldPNK: &v1alpha1.PodNetworkKind{
-				Status: v1alpha1.PodNetworkKindStatus{},
-			},
-			newPNK: &v1alpha1.PodNetworkKind{
-				Status: v1alpha1.PodNetworkKindStatus{
-					DefaultPodNetworkKind: ptr.To(true),
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "different DefaultPodNetworkKind true vs false",
-			oldPNK: &v1alpha1.PodNetworkKind{
-				Status: v1alpha1.PodNetworkKindStatus{
-					DefaultPodNetworkKind: ptr.To(true),
-				},
-			},
-			newPNK: &v1alpha1.PodNetworkKind{
-				Status: v1alpha1.PodNetworkKindStatus{
-					DefaultPodNetworkKind: ptr.To(false),
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "identical DefaultPodNetworkKind",
-			oldPNK: &v1alpha1.PodNetworkKind{
-				Status: v1alpha1.PodNetworkKindStatus{
-					DefaultPodNetworkKind: ptr.To(true),
-				},
-			},
-			newPNK: &v1alpha1.PodNetworkKind{
-				Status: v1alpha1.PodNetworkKindStatus{
-					DefaultPodNetworkKind: ptr.To(true),
-				},
-			},
-			expected: false,
 		},
 	}
 

@@ -30,31 +30,26 @@ import (
 	"github.com/kubernetes-sigs/multi-network-api/apis/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/restmapper"
 )
 
 var _ = Describe("Pod Network Attachment", func() {
 	It("should create a network from manifest, attach a pod to it via ResourceClaim, and verify status in ResourceClaim", func(ctx context.Context) {
-		// Resolve the implementation CRD and its scope
-		crdList, err := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().List(ctx, metav1.ListOptions{})
-		Expect(err).NotTo(HaveOccurred(), "failed to list CRDs")
+		// Resolve the implementation resource type and its scope via API discovery
+		groupResources, err := restmapper.GetAPIGroupResources(kubeClient.Discovery())
+		Expect(err).NotTo(HaveOccurred(), "failed to get API group resources from discovery")
 
-		var crd *apiextensionsv1.CustomResourceDefinition
-		for i := range crdList.Items {
-			item := &crdList.Items[i]
-			if item.Spec.Group == implementationGroup && item.Spec.Names.Kind == implementationKind {
-				crd = item
-				break
-			}
-		}
-		Expect(crd).NotTo(BeNil(), "CRD for group %s and kind %s not found", implementationGroup, implementationKind)
+		mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
+		mapping, err := mapper.RESTMapping(schema.GroupKind{Group: implementationGroup, Kind: implementationKind})
+		Expect(err).NotTo(HaveOccurred(), "failed to resolve REST mapping for group %s and kind %s", implementationGroup, implementationKind)
 
-		isNamespaced := crd.Spec.Scope == apiextensionsv1.NamespaceScoped
+		isNamespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
 
 		By(fmt.Sprintf("installing network instance from manifest %s", networkManifest))
 		yamlBytes, readErr := os.ReadFile(networkManifest)
@@ -78,7 +73,7 @@ var _ = Describe("Pod Network Attachment", func() {
 			targetGVR := schema.GroupVersionResource{
 				Group:    gvk.Group,
 				Version:  gvk.Version,
-				Resource: crd.Spec.Names.Plural,
+				Resource: mapping.Resource.Resource,
 			}
 
 			ns := obj.GetNamespace()
@@ -112,7 +107,7 @@ var _ = Describe("Pod Network Attachment", func() {
 		}
 		Expect(networkName).NotTo(BeEmpty(), "no network object matching group %s and kind %s found in manifest", implementationGroup, implementationKind)
 
-		podNetworkKindName := v1alpha1.GetPodNetworkKindName(implementationGroup, implementationKind)
+		podNetworkKindName := podNetworkKind.Name
 		deviceClassName := "conformance-" + podNetworkKindName
 
 		By(fmt.Sprintf("ensuring DeviceClass %s exists", deviceClassName))
@@ -208,34 +203,64 @@ var _ = Describe("Pod Network Attachment", func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(c.Status.Devices).NotTo(BeEmpty(), "no devices allocated on ResourceClaim")
 
-			for _, dev := range c.Status.Devices {
-				g.Expect(dev.NetworkData).NotTo(BeNil(), "networkData should not be nil")
-				g.Expect(dev.NetworkData.InterfaceName).NotTo(BeEmpty(), "interface name must be reported")
+			for _, device := range c.Status.Devices {
+				g.Expect(device.NetworkData).NotTo(BeNil(), "networkData should not be nil")
+				g.Expect(device.NetworkData.InterfaceName).NotTo(BeEmpty(), "interface name must be reported")
 
-				if dev.Data != nil && len(dev.Data.Raw) > 0 {
-					var podNet *v1alpha1.PodNetwork
-					var wrapper struct {
-						PodNetwork *v1alpha1.PodNetwork `json:"podNetwork,omitempty"`
-					}
-					if jsonErr := json.Unmarshal(dev.Data.Raw, &wrapper); jsonErr == nil && wrapper.PodNetwork != nil {
-						podNet = wrapper.PodNetwork
-					} else {
-						var direct v1alpha1.PodNetwork
-						if jsonErr := json.Unmarshal(dev.Data.Raw, &direct); jsonErr == nil && direct.Name != "" {
-							podNet = &direct
-						}
-					}
+				g.Expect(device.Data).NotTo(BeNil(), "device.data must not be nil")
+				g.Expect(device.Data.Raw).NotTo(BeEmpty(), "device.data.raw must not be empty")
 
-					if podNet != nil {
-						g.Expect(podNet.Name).To(Equal(networkName))
-						if podNet.Kind != "" {
-							g.Expect(podNet.Kind).To(Equal(podNetworkKindName))
-						}
-						if isNamespaced && podNet.Namespace != nil {
-							g.Expect(*podNet.Namespace).To(Equal(networkNamespace))
-						}
-					}
+				var deviceStatus v1alpha1.DeviceStatus
+				jsonErr := json.Unmarshal(device.Data.Raw, &deviceStatus)
+				g.Expect(jsonErr).NotTo(HaveOccurred(), "failed to unmarshal device.data into DeviceStatus")
+				g.Expect(deviceStatus.PodNetwork).NotTo(BeNil(), "data.podNetwork must be present in device status")
+
+				podNetwork := deviceStatus.PodNetwork
+				g.Expect(podNetwork.Name).To(Equal(networkName), "podNetwork.name mismatch")
+				g.Expect(podNetwork.Kind).To(Equal(podNetworkKindName), "podNetwork.kind mismatch")
+				if isNamespaced {
+					g.Expect(podNetwork.Namespace).NotTo(BeNil(), "podNetwork.namespace must be set for namespaced network")
+					g.Expect(*podNetwork.Namespace).To(Equal(networkNamespace), "podNetwork.namespace mismatch")
+				} else {
+					g.Expect(podNetwork.Namespace).To(BeNil(), "podNetwork.namespace must not be set for cluster-scoped network")
 				}
+			}
+		}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
+
+		By("verifying advertised device attributes in ResourceSlice")
+		Eventually(func(g Gomega) {
+			slices, listErr := kubeClient.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+			g.Expect(listErr).NotTo(HaveOccurred(), "failed to list ResourceSlices")
+
+			var matchedDevice *resourcev1.Device
+			for _, slice := range slices.Items {
+				for i := range slice.Spec.Devices {
+					dev := &slice.Spec.Devices[i]
+					netAttr, hasNet := dev.Attributes[resourcev1.QualifiedName(v1alpha1.StandardDeviceAttributePodNetwork)]
+					if !hasNet || netAttr.StringValue == nil || *netAttr.StringValue != networkName {
+						continue
+					}
+					kindAttr, hasKind := dev.Attributes[resourcev1.QualifiedName(v1alpha1.StandardDeviceAttributePodNetworkKind)]
+					if hasKind && kindAttr.StringValue != nil && *kindAttr.StringValue != podNetworkKindName {
+						continue
+					}
+					matchedDevice = dev
+					break
+				}
+				if matchedDevice != nil {
+					break
+				}
+			}
+
+			g.Expect(matchedDevice).NotTo(BeNil(), "advertised device for network %q not found in ResourceSlices", networkName)
+
+			nsAttr, hasNs := matchedDevice.Attributes[resourcev1.QualifiedName(v1alpha1.StandardDeviceAttributePodNetworkNamespace)]
+			if isNamespaced {
+				g.Expect(hasNs).To(BeTrue(), "%s must be set for namespaced network", v1alpha1.StandardDeviceAttributePodNetworkNamespace)
+				g.Expect(nsAttr.StringValue).NotTo(BeNil())
+				g.Expect(*nsAttr.StringValue).To(Equal(networkNamespace))
+			} else {
+				g.Expect(hasNs).To(BeFalse(), "%s must not exist for cluster-scoped network", v1alpha1.StandardDeviceAttributePodNetworkNamespace)
 			}
 		}).WithContext(ctx).WithTimeout(Timeout).WithPolling(Polling).Should(Succeed())
 	})

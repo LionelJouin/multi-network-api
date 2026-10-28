@@ -17,8 +17,7 @@ limitations under the License.
 package v1alpha1
 
 // Categories represents the list of mandatory categories that must be present
-// in CustomResourceDefinitions that PodNetworkKind can be associated with.
+// in Resource Type that PodNetworkKind can be associated with.
 var Categories = []string{
-	"podnetwork",
 	"podnetworks",
 }

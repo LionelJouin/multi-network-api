@@ -18,14 +18,7 @@ package v1alpha1
 
 import (
 	"fmt"
-	"strings"
 )
-
-func GetPodNetworkKindName(group string, kind string) string {
-	g := strings.ReplaceAll(strings.ToLower(group), ".", "-")
-	k := strings.ToLower(kind)
-	return fmt.Sprintf("%s-%s", g, k)
-}
 
 func GroupKind(group string, kind string) string {
 	return fmt.Sprintf("%s/%s", group, kind)

@@ -23,9 +23,6 @@ spec:
     - jsonPath: .spec.implementationType.kind
       name: Kind
       type: string
-    - jsonPath: .status.defaultPodNetworkKind
-      name: Default
-      type: boolean
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -55,16 +52,6 @@ spec:
               spec is the desired state of the PodNetworkKind.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
             properties:
-              defaultPodNetworkKind:
-                description: |-
-                  DefaultPodNetworkKind indicates whether this PodNetworkKind requests to be the default for the cluster.
-                  If true, this PodNetworkKind is requesting to be the default for the cluster.
-                  If false, this PodNetworkKind is not requesting to be the default for the cluster.
-                  If not specified, the default is false.
-                type: boolean
-                x-kubernetes-validations:
-                - message: spec.DefaultPodNetworkKind is immutable
-                  rule: self == oldSelf
               implementationType:
                 description: |-
                   ImplementationType identifies the API type of the pod network objects
@@ -80,7 +67,7 @@ spec:
                 - kind
                 type: object
                 x-kubernetes-validations:
-                - message: spec.ImplementationType is immutable
+                - message: spec.implementationType is immutable
                   rule: self == oldSelf
             required:
             - implementationType
@@ -150,16 +137,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              defaultPodNetworkKind:
-                description: |-
-                  DefaultPodNetworkKind indicates whether this PodNetworkKind has been selected to be the default for the cluster.
-                  When multiple PodNetworkKinds have spec.DefaultPodNetworkKind set to true, the candidate selected as default
-                  is the oldest PodNetworkKind determined by metadata.creationTimestamp. If timestamps are equal, the
-                  candidate selected as default is the one with the first name in the list sorted in alphabetical order.
-                  If another PodNetworkKind is already the active default PodNetworkKind, this field will be false even if
-                  spec.DefaultPodNetworkKind is true, and a condition will be set to indicate that the default PodNetworkKind
-                  is already set.
-                type: boolean
             type: object
         type: object
     served: true
